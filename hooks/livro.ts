@@ -24,6 +24,7 @@ export type Codigo =
   | 'amanha'
 export type Evento = { t: number; tipo: TipoEvento; nivel?: Nivel; codigo?: Codigo }
 export type Diario = { formato: 1; eventos: Evento[] }
+export type Leitura<V> = { ok: true; valor: V } | { ok: false; codigo: Codigo }
 
 const DIA_MS = 86_400_000
 const TRINTA_DIAS_MS = 30 * DIA_MS
@@ -107,6 +108,23 @@ export async function erroCorrente($: EngineInterface): Promise<ErroDados | null
 // D16: grava se nunca gravou neste módulo ou se passaram 60 s desde a última gravação.
 export function gravacaoVencida(agora: number): boolean {
   return ultimaGravacao === null || agora - ultimaGravacao >= INTERVALO_GRAVACAO_MS
+}
+
+// Em session.start: as 4 chaves são lidas e cada uma rejeitada é relatada fora do desenho.
+export async function verificarDados($: EngineInterface): Promise<void> {
+  await ler($, LIVRO)
+  await ler($, SILENCIO)
+  await ler($, EXPLICADO)
+  await ler($, DIARIO)
+}
+
+// Para o `ui.render`: leitura sem relatar (o desenho não grava).
+export async function espiarLivro($: EngineInterface): Promise<Leitura<Livro>> {
+  return lerSemRelatar($, LIVRO)
+}
+
+export async function espiarSilencio($: EngineInterface): Promise<Leitura<Silencio>> {
+  return lerSemRelatar($, SILENCIO)
 }
 
 export async function lerLivro($: EngineInterface): Promise<Livro | null> {
@@ -254,12 +272,20 @@ function numero(x: unknown): x is number {
 
 // ---------- I/O ----------
 
-// Matriz: ausente → forma v1 vazia; v1 válida → usar; qualquer outra → erro `dados-incompativeis:<chave>`.
-async function ler<V>($: EngineInterface, d: Desc<V>): Promise<V | null> {
+// Matriz: ausente → forma v1 vazia; v1 válida → usar; qualquer outra → `dados-incompativeis:<chave>`.
+// Só lê: serve ao `ui.render`, onde gravar no `$.state` é recusado.
+async function lerSemRelatar<V>($: EngineInterface, d: Desc<V>): Promise<Leitura<V>> {
   const bruto = await $.store.get(d.chave)
-  if (bruto === undefined) return d.vazio()
-  if (d.validar(bruto)) return bruto
-  await falhar($, `dados-incompativeis:${d.chave}`, null, null, d.chave !== 'diario')
+  if (bruto === undefined) return { ok: true, valor: d.vazio() }
+  if (d.validar(bruto)) return { ok: true, valor: bruto }
+  return { ok: false, codigo: `dados-incompativeis:${d.chave}` }
+}
+
+// Fora do desenho: a leitura rejeitada vira o erro corrente (atom, status, diário).
+async function ler<V>($: EngineInterface, d: Desc<V>): Promise<V | null> {
+  const l = await lerSemRelatar($, d)
+  if (l.ok) return l.valor
+  await falhar($, l.codigo, null, null, d.chave !== 'diario')
   return null
 }
 

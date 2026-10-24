@@ -7,6 +7,8 @@ import { resolverConfig, versaoAtende, type ConfigResolvida } from './config'
 import {
   apagarDados,
   erroCorrente,
+  espiarLivro,
+  espiarSilencio,
   gravacaoVencida,
   gravarRegistro,
   iniciarLivro,
@@ -19,6 +21,9 @@ import {
   registrarEvento,
   silenciado,
   silenciar,
+  verificarDados,
+  type Livro,
+  type Silencio,
 } from './livro'
 import {
   estadoFaixa,
@@ -32,6 +37,7 @@ import {
   TITULO,
   USO,
   type Acao,
+  type EntradaDetalhes,
 } from './ui'
 
 const VERSAO_MINIMA = [2, 1, 310] as const
@@ -56,6 +62,8 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     await iniciarLivro($)
+    // O desenho não relata erro de dados; os dados guardados são verificados (e relatados) aqui.
+    await verificarDados($)
     const { base } = await $.session.version()
     config = null
     if (!versaoAtende(base, VERSAO_MINIMA)) {
@@ -121,13 +129,14 @@ export const register: Register = (on, options) => {
   })
 
   // D11: a bolinha T na faixa (terminal e desktop); com pesquisa na faixa, passa a vez.
+  // O desenho só lê: um silêncio incompatível aparece como erro sem gravar (o relato é de session.start e das gravações).
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
-    const silencio = await lerSilencio($)
+    const silencio = await espiarSilencio($)
     const f = estadoFaixa(
       await read($, atencao),
-      silencio,
-      erroCodigo ?? (await erroCorrente($))?.codigo ?? null,
+      silencio.ok ? silencio.valor : null,
+      erroCodigo ?? (await erroCorrente($))?.codigo ?? (silencio.ok ? null : silencio.codigo),
       await $.clock.now(),
       await read($, explicar),
     )
@@ -135,7 +144,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const linhas = modeloDetalhes(await entradaDetalhes($))
+    const linhas = modeloDetalhes(await entradaDetalhes($, true))
     return painel($.ui.resolve(e), linhas, config !== null, async a => {
       await executar($, a)
     })
@@ -172,7 +181,7 @@ async function executar($: EngineInterface, a: Acao): Promise<string> {
       break
     case 'detalhes':
       await update($, explicar, () => false)
-      texto = textoDetalhes(modeloDetalhes(await entradaDetalhes($)))
+      texto = textoDetalhes(modeloDetalhes(await entradaDetalhes($, false)))
       break
     case 'silenciar-1h':
     case 'silenciar-amanha': {
@@ -209,13 +218,28 @@ async function falhaDeDados($: EngineInterface, oQue: string): Promise<string> {
   return `Não foi possível ${oQue}: ${e.codigo} · /hsg`
 }
 
-async function entradaDetalhes($: EngineInterface) {
+// `noDesenho`: dentro do `ui.render` lê sem relatar (gravar no `$.state` ali é recusado) e mostra a
+// incompatibilidade como erro; fora dele (`/hsg`) a leitura relata pelo caminho de `livro.ts`.
+async function entradaDetalhes($: EngineInterface, noDesenho: boolean): Promise<EntradaDetalhes> {
+  let livro: Livro | null
+  let silencio: Silencio | null
+  let incompativel: string | null = null
+  if (noDesenho) {
+    const l = await espiarLivro($)
+    const s = await espiarSilencio($)
+    livro = l.ok ? l.valor : null
+    silencio = s.ok ? s.valor : null
+    incompativel = !l.ok ? l.codigo : !s.ok ? s.codigo : null
+  } else {
+    livro = await lerLivro($)
+    silencio = await lerSilencio($)
+  }
   const e = await erroCorrente($)
   return {
     sessao: await read($, atencao),
-    livro: await lerLivro($),
-    silencio: await lerSilencio($),
-    erro: erro ?? (e === null ? null : `${e.codigo}${e.detalhe === null ? '' : `: ${e.detalhe}`}`),
+    livro,
+    silencio,
+    erro: erro ?? (e === null ? incompativel : `${e.codigo}${e.detalhe === null ? '' : `: ${e.detalhe}`}`),
     config,
     agora: await $.clock.now(),
   }
