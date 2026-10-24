@@ -1,56 +1,34 @@
-// Persistência v1 no `$.store` (design M2 D14–D16, D19). Único arquivo que toca `$.store`.
-// Regras puras (validação, poda, upsert, medida) primeiro; I/O depois.
+// Persistência v2 no `$.store` (mod-v2 D-P1…D-P3). Único arquivo que toca `$.store`.
+// Regras puras (validação, poda, upsert, migração) primeiro; I/O depois.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { ErroDados, Nivel } from '../types'
+import type { ErroDados } from '../types'
 import type { Registro } from './atencao'
 import type { CampoConfig } from './config'
 
-export type Chave = 'livro' | 'silencio' | 'explicado' | 'diario'
-export type Livro = { formato: 1; sessoes: Registro[] }
-export type Silencio = { formato: 1; ate: number | null }
-export type Explicado = { formato: 1; t: boolean }
-export type TipoEvento = 'nivel' | 'detalhes' | 'silenciar' | 'reativar' | 'erro'
-export type Codigo =
-  | 'versao'
-  | `config:${CampoConfig}`
-  | `dados-incompativeis:${Chave}`
-  | 'livro-cheio'
-  | 'diario-cheio'
-  | 'store-recusou'
-  | 'silenciado'
-  | '1h'
-  | 'amanha'
-export type Evento = { t: number; tipo: TipoEvento; nivel?: Nivel; codigo?: Codigo }
-export type Diario = { formato: 1; eventos: Evento[] }
+export type Chave = 'livro'
+export type Livro = { formato: 2; sessoes: Registro[] }
+export type Codigo = 'versao' | `config:${CampoConfig}` | `dados-incompativeis:${Chave}` | 'livro-cheio' | 'store-recusou'
 export type Leitura<V> = { ok: true; valor: V } | { ok: false; codigo: Codigo }
+
+// Formato 1 do M2: o registro tinha mais campos; a migração (D-P2) os descarta.
+type RegistroV1 = Registro & { n: number; nFora: number; maiorLacunaSeg: number; dias: string[] }
+type LivroV1 = { formato: 1; sessoes: RegistroV1[] }
 
 const DIA_MS = 86_400_000
 const TRINTA_DIAS_MS = 30 * DIA_MS
-const HORA_MS = 3_600_000
 const ORCAMENTO = 1_048_576
-const INTERVALO_GRAVACAO_MS = 60_000
 
-const CHAVES: readonly Chave[] = ['livro', 'silencio', 'explicado', 'diario']
-const CAMPOS_CONFIG: readonly CampoConfig[] = ['inicio', 'fim', 'dias', 'intensidade', 'fimAtencaoMin', 'pausaMinMin']
-const TIPOS: readonly TipoEvento[] = ['nivel', 'detalhes', 'silenciar', 'reativar', 'erro']
-const NIVEIS: readonly Nivel[] = ['neutro', 'atencao', 'alerta']
-const CODIGOS: readonly string[] = [
-  'versao',
-  ...CAMPOS_CONFIG.map(c => `config:${c}`),
-  ...CHAVES.map(c => `dados-incompativeis:${c}`),
-  'livro-cheio',
-  'diario-cheio',
-  'store-recusou',
-  'silenciado',
-  '1h',
-  'amanha',
-]
+// D-P3: chaves do formato antigo, sem uso. `/hsg` as avisa; `apagar-dados confirmar` as remove com as do formato 2.
+export const CHAVES_LEGADAS = ['silencio', 'explicado', 'diario'] as const
+export const CHAVES_APAGAR = ['livro', 'objetivos', 'avaliacoes', ...CHAVES_LEGADAS] as const
 
-type Desc<V> = {
+export type Desc<V> = {
   chave: Chave
   validar: (x: unknown) => x is V
+  // Converte um formato anterior válido; `null` se `x` não é um formato anterior conhecido.
+  migrar: ((x: unknown) => V | null) | null
   vazio: () => V
   podar: (v: V, agora: number) => V
   cheio: Codigo | null
@@ -59,45 +37,20 @@ type Desc<V> = {
 const LIVRO: Desc<Livro> = {
   chave: 'livro',
   validar: validarLivro,
-  vazio: () => ({ formato: 1, sessoes: [] }),
+  migrar: x => (validarLivroV1(x) ? migrarLivroV1(x) : null),
+  vazio: () => ({ formato: 2, sessoes: [] }),
   podar: (v, agora) => ({ ...v, sessoes: v.sessoes.filter(r => r.fim >= agora - TRINTA_DIAS_MS) }),
   cheio: 'livro-cheio',
-}
-const SILENCIO: Desc<Silencio> = {
-  chave: 'silencio',
-  validar: validarSilencio,
-  vazio: () => ({ formato: 1, ate: null }),
-  podar: v => v,
-  cheio: null,
-}
-const EXPLICADO: Desc<Explicado> = {
-  chave: 'explicado',
-  validar: validarExplicado,
-  vazio: () => ({ formato: 1, t: false }),
-  podar: v => v,
-  cheio: null,
-}
-const DIARIO: Desc<Diario> = {
-  chave: 'diario',
-  validar: validarDiario,
-  vazio: () => ({ formato: 1, eventos: [] }),
-  podar: (v, agora) => ({ ...v, eventos: v.eventos.filter(e => e.t >= agora - TRINTA_DIAS_MS) }),
-  cheio: 'diario-cheio',
 }
 
 // Erro corrente num atom: a faixa o lê e redesenha quando ele muda. Zerado em `iniciarLivro`.
 const erroAtom = atom({ plugin: 'harness-session-guard', key: 'erro' } as const, null, { shape: 'erro-1' })
 
-// Estado do módulo: recomeça a cada reload e é refeito em session.start (`iniciarLivro`).
-let debug = false
-let ultimaGravacao: number | null = null
+// ---------- API (register.tsx e tracks seguintes) ----------
 
-// ---------- API (track 04 e register.tsx) ----------
-
-// D19: lê `HSG_DEBUG` e, com `1`, registra o fuso local no log (prova de R3; não vai para o store).
+// D-P6: com `HSG_DEBUG=1`, registra o fuso local no log (não vai para o store).
 export async function iniciarLivro($: EngineInterface): Promise<void> {
-  debug = (await $.env.get('HSG_DEBUG')) === '1'
-  if (debug) $.ui.log(`harness-session-guard tz=${new Date().getTimezoneOffset()}`)
+  if ((await $.env.get('HSG_DEBUG')) === '1') $.ui.log(`harness-session-guard tz=${new Date().getTimezoneOffset()}`)
   await update($, erroAtom, () => null)
 }
 
@@ -105,17 +58,20 @@ export async function erroCorrente($: EngineInterface): Promise<ErroDados | null
   return read($, erroAtom)
 }
 
-// D16: grava se nunca gravou neste módulo ou se passaram 60 s desde a última gravação.
-export function gravacaoVencida(agora: number): boolean {
-  return ultimaGravacao === null || agora - ultimaGravacao >= INTERVALO_GRAVACAO_MS
+// Em session.start: o livro é lido e, se rejeitado, relatado fora do desenho. Um formato 1 válido é
+// persistido como formato 2 aqui (D-P2).
+export async function verificarDados($: EngineInterface): Promise<void> {
+  if (validarLivroV1(await $.store.get(LIVRO.chave))) {
+    await gravar($, LIVRO, await $.clock.now(), v => v)
+    return
+  }
+  await ler($, LIVRO)
 }
 
-// Em session.start: as 4 chaves são lidas e cada uma rejeitada é relatada fora do desenho.
-export async function verificarDados($: EngineInterface): Promise<void> {
-  await ler($, LIVRO)
-  await ler($, SILENCIO)
-  await ler($, EXPLICADO)
-  await ler($, DIARIO)
+// D-P3: as chaves do formato antigo presentes no store, para o aviso do `/hsg`.
+export async function chavesAntigas($: EngineInterface): Promise<string[]> {
+  const todas = await $.store.keys()
+  return CHAVES_LEGADAS.filter(k => todas.includes(k))
 }
 
 // Para o `ui.render`: leitura sem relatar (o desenho não grava).
@@ -123,80 +79,28 @@ export async function espiarLivro($: EngineInterface): Promise<Leitura<Livro>> {
   return lerSemRelatar($, LIVRO)
 }
 
-export async function espiarSilencio($: EngineInterface): Promise<Leitura<Silencio>> {
-  return lerSemRelatar($, SILENCIO)
-}
-
 export async function lerLivro($: EngineInterface): Promise<Livro | null> {
   return ler($, LIVRO)
 }
 
-export async function lerSilencio($: EngineInterface): Promise<Silencio | null> {
-  return ler($, SILENCIO)
-}
-
-export async function lerExplicado($: EngineInterface): Promise<Explicado | null> {
-  return ler($, EXPLICADO)
-}
-
-// D16: upsert do registro pelo `id`, relendo o livro antes da gravação.
+// Upsert do registro pelo `id`, relendo o livro antes da gravação.
 export async function gravarRegistro($: EngineInterface, r: Registro, agora: number): Promise<void> {
-  if (await gravar($, LIVRO, agora, v => upsert(v, r))) ultimaGravacao = agora
+  await gravar($, LIVRO, agora, v => upsert(v, r))
 }
 
-// D8: silenciar 1h ou até o dia local seguinte à hora `inicio`. Devolve o `ate` gravado, ou `null` se não gravou.
-export async function silenciar(
-  $: EngineInterface,
-  modo: '1h' | 'amanha',
-  agora: number,
-  inicio: number,
-): Promise<number | null> {
-  const ate = modo === '1h' ? agora + HORA_MS : amanhaAs(agora, inicio)
-  if (!(await gravar($, SILENCIO, agora, v => ({ ...v, ate })))) return null
-  await registrarEvento($, { t: agora, tipo: 'silenciar', codigo: modo })
-  return ate
-}
-
-export async function reativar($: EngineInterface, agora: number): Promise<boolean> {
-  if (!(await gravar($, SILENCIO, agora, v => ({ ...v, ate: null })))) return false
-  await registrarEvento($, { t: agora, tipo: 'reativar' })
-  return true
-}
-
-// D18: `explicado.t` vira `true` depois da primeira explicação.
-export async function marcarExplicado($: EngineInterface, agora: number): Promise<void> {
-  await gravar($, EXPLICADO, agora, v => ({ ...v, t: true }))
-}
-
-// D19: com HSG_DEBUG=1 o evento também vai para `$.ui.log`.
-export async function registrarEvento($: EngineInterface, e: Evento): Promise<void> {
-  if (debug) $.ui.log(`harness-session-guard ${e.tipo}${e.nivel ? ` ${e.nivel}` : ''}${e.codigo ? ` ${e.codigo}` : ''}`)
-  await gravar($, DIARIO, e.t, v => ({ ...v, eventos: [...v.eventos, e] }))
-}
-
-// `/hsg apagar-dados confirmar`: remove as 4 chaves e limpa o erro de dados.
+// `/hsg apagar-dados confirmar`: remove as chaves de `CHAVES_APAGAR` e limpa o erro de dados.
 export async function apagarDados($: EngineInterface): Promise<void> {
-  for (const chave of CHAVES) await $.store.delete(chave)
+  for (const chave of CHAVES_APAGAR) await $.store.delete(chave)
   await update($, erroAtom, () => null)
-  ultimaGravacao = null
   $.ui.status(undefined)
 }
 
-// Erro de origem externa ao store (versão, configuração): vira o erro corrente e um evento do diário.
-export async function registrarErro($: EngineInterface, codigo: Codigo, agora: number): Promise<void> {
-  await falhar($, codigo, null, agora, true)
+// Erro de origem externa ao store (versão, configuração): vira o erro corrente.
+export async function registrarErro($: EngineInterface, codigo: Codigo): Promise<void> {
+  await falhar($, codigo, null)
 }
 
 // ---------- Regras puras ----------
-
-export function silenciado(s: Silencio, agora: number): boolean {
-  return s.ate !== null && agora < s.ate
-}
-
-export function amanhaAs(agora: number, inicio: number): number {
-  const d = new Date(agora)
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, inicio, 0, 0, 0).getTime()
-}
 
 export function upsert(v: Livro, r: Registro): Livro {
   const i = v.sessoes.findIndex(s => s.id === r.id)
@@ -209,30 +113,31 @@ export function upsert(v: Livro, r: Registro): Livro {
 export function validarLivro(x: unknown): x is Livro {
   return (
     objetoCom(x, ['formato', 'sessoes']) &&
-    x.formato === 1 &&
+    x.formato === 2 &&
     Array.isArray(x.sessoes) &&
     x.sessoes.every(validarRegistro)
   )
 }
 
-export function validarSilencio(x: unknown): x is Silencio {
-  return objetoCom(x, ['formato', 'ate']) && x.formato === 1 && (x.ate === null || numero(x.ate))
-}
-
-export function validarExplicado(x: unknown): x is Explicado {
-  return objetoCom(x, ['formato', 't']) && x.formato === 1 && typeof x.t === 'boolean'
-}
-
-export function validarDiario(x: unknown): x is Diario {
+// D-P2: a forma exata do M2.
+export function validarLivroV1(x: unknown): x is LivroV1 {
   return (
-    objetoCom(x, ['formato', 'eventos']) &&
+    objetoCom(x, ['formato', 'sessoes']) &&
     x.formato === 1 &&
-    Array.isArray(x.eventos) &&
-    x.eventos.every(validarEvento)
+    Array.isArray(x.sessoes) &&
+    x.sessoes.every(validarRegistroV1)
   )
 }
 
+function migrarLivroV1(v: LivroV1): Livro {
+  return { formato: 2, sessoes: v.sessoes.map(({ id, ini, fim }) => ({ id, ini, fim })) }
+}
+
 function validarRegistro(x: unknown): x is Registro {
+  return objetoCom(x, ['id', 'ini', 'fim']) && typeof x.id === 'string' && numero(x.ini) && numero(x.fim)
+}
+
+function validarRegistroV1(x: unknown): x is RegistroV1 {
   return (
     objetoCom(x, ['id', 'ini', 'fim', 'n', 'nFora', 'maiorLacunaSeg', 'dias']) &&
     typeof x.id === 'string' &&
@@ -243,19 +148,6 @@ function validarRegistro(x: unknown): x is Registro {
     numero(x.maiorLacunaSeg) &&
     Array.isArray(x.dias) &&
     x.dias.every(d => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d))
-  )
-}
-
-function validarEvento(x: unknown): x is Evento {
-  if (typeof x !== 'object' || x === null || Array.isArray(x)) return false
-  const o = x as Record<string, unknown>
-  const chaves = Object.keys(o)
-  return (
-    chaves.every(k => k === 't' || k === 'tipo' || k === 'nivel' || k === 'codigo') &&
-    numero(o.t) &&
-    TIPOS.includes(o.tipo as TipoEvento) &&
-    (!('nivel' in o) || NIVEIS.includes(o.nivel as Nivel)) &&
-    (!('codigo' in o) || CODIGOS.includes(o.codigo as string))
   )
 }
 
@@ -272,30 +164,33 @@ function numero(x: unknown): x is number {
 
 // ---------- I/O ----------
 
-// Matriz: ausente → forma v1 vazia; v1 válida → usar; qualquer outra → `dados-incompativeis:<chave>`.
+// Matriz: ausente → forma vazia; forma atual válida → usar; formato anterior válido → migrado em memória;
+// qualquer outra → `dados-incompativeis:<chave>`.
 // Só lê: serve ao `ui.render`, onde gravar no `$.state` é recusado.
 async function lerSemRelatar<V>($: EngineInterface, d: Desc<V>): Promise<Leitura<V>> {
   const bruto = await $.store.get(d.chave)
   if (bruto === undefined) return { ok: true, valor: d.vazio() }
   if (d.validar(bruto)) return { ok: true, valor: bruto }
+  const migrado = d.migrar === null ? null : d.migrar(bruto)
+  if (migrado !== null) return { ok: true, valor: migrado }
   return { ok: false, codigo: `dados-incompativeis:${d.chave}` }
 }
 
-// Fora do desenho: a leitura rejeitada vira o erro corrente (atom, status, diário).
+// Fora do desenho: a leitura rejeitada vira o erro corrente (atom e status).
 async function ler<V>($: EngineInterface, d: Desc<V>): Promise<V | null> {
   const l = await lerSemRelatar($, d)
   if (l.ok) return l.valor
-  await falhar($, l.codigo, null, null, d.chave !== 'diario')
+  await falhar($, l.codigo, null)
   return null
 }
 
-// D15: get → validar → podar → mudar → medir → set. Devolve `true` só se gravou.
-async function gravar<V>($: EngineInterface, d: Desc<V>, agora: number, mudar: (v: V) => V): Promise<boolean> {
+// get → validar → podar → mudar → medir → set. Devolve `true` só se gravou.
+export async function gravar<V>($: EngineInterface, d: Desc<V>, agora: number, mudar: (v: V) => V): Promise<boolean> {
   const atual = await ler($, d)
   if (atual === null) return false
   const novo = mudar(d.podar(atual, agora))
   if (d.cheio !== null && JSON.stringify(novo).length > ORCAMENTO) {
-    await falhar($, d.cheio, null, agora, d.chave !== 'diario')
+    await falhar($, d.cheio, null)
     return false
   }
   const recusa = await $.store.set(d.chave, novo).then(
@@ -303,7 +198,7 @@ async function gravar<V>($: EngineInterface, d: Desc<V>, agora: number, mudar: (
     (r: unknown) => (r instanceof Error ? r.message : String(r)),
   )
   if (recusa !== null) {
-    await falhar($, 'store-recusou', recusa, agora, d.chave !== 'diario')
+    await falhar($, 'store-recusou', recusa)
     return false
   }
   return true
@@ -311,17 +206,9 @@ async function gravar<V>($: EngineInterface, d: Desc<V>, agora: number, mudar: (
 
 // O erro mais recente fica no atom e no status; a mensagem da recusa nunca vai para o store.
 // O mesmo erro, enquanto é o corrente, é registrado uma vez (a faixa e o painel releem o store a cada desenho).
-// `noDiario` é falso quando o erro vem do próprio diário (gravar nele de novo repetiria a falha).
-async function falhar(
-  $: EngineInterface,
-  codigo: Codigo,
-  detalhe: string | null,
-  agora: number | null,
-  noDiario: boolean,
-): Promise<void> {
+async function falhar($: EngineInterface, codigo: Codigo, detalhe: string | null): Promise<void> {
   const corrente = await read($, erroAtom)
   if (corrente !== null && corrente.codigo === codigo && corrente.detalhe === detalhe) return
   await update($, erroAtom, () => ({ codigo, detalhe }))
   $.ui.status(`harness-session-guard: ${codigo}${detalhe === null ? '' : `: ${detalhe}`} · /hsg`)
-  if (noDiario) await registrarEvento($, { t: agora ?? (await $.clock.now()), tipo: 'erro', codigo })
 }
