@@ -1,2 +1,4 @@
 # Tipos gerados pelo Claude Code a cada carga do mod
 .claude-plugin/types/
+# Escrito pelo engine na carga; estende .claude-plugin/types/tsconfig.json (ignorado acima)
+/tsconfig.json

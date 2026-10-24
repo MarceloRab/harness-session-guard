@@ -25,6 +25,8 @@ declare module 'claude-code' {
       // U4 (D18): a linha de explicação fica visível até abrir os detalhes ou fechar a sessão.
       explicar: Shaped<boolean>
       erro: Shaped<ErroDados | null>
+      // D8: o `ate` do último silêncio que expirou; a faixa o lê para redesenhar na expiração.
+      silencioFim: Shaped<number | null>
     }
   }
 }

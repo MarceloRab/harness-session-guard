@@ -49,6 +49,10 @@ const PANE = 'hsg-detalhes'
 const atencao = atom({ plugin: 'harness-session-guard', key: 'atencao' } as const, null, { shape: 'atencao-1' })
 // U4 (D18): linha de explicação visível até abrir os detalhes ou fechar a sessão.
 const explicar = atom({ plugin: 'harness-session-guard', key: 'explicar' } as const, false, { shape: 'explicar-1' })
+// D8: escrito pelo timer na hora `ate`; a faixa o lê, e a escrita a redesenha quando o silêncio expira.
+const silencioFim = atom({ plugin: 'harness-session-guard', key: 'silencioFim' } as const, null, {
+  shape: 'silencio-fim-1',
+})
 
 // Estado do módulo: recomeça a cada reload e é refeito em session.start.
 // `config` null = o mod não mede (versão ou configuração com erro, em `erro`; código curto em `erroCodigo`).
@@ -56,6 +60,7 @@ let config: ConfigResolvida | null = null
 let erro: string | null = null
 let erroCodigo: string | null = null
 let timer: Timer | null = null
+let timerSilencio: Timer | null = null
 
 export const register: Register = (on, options) => {
   const resultado = resolverConfig(options)
@@ -86,6 +91,7 @@ export const register: Register = (on, options) => {
       argumentHint: '[silenciar 1h | silenciar amanha | reativar | apagar-dados [confirmar]]',
     })
     await retomar($)
+    armarSilencio($, (await lerSilencio($))?.ate ?? null, await $.clock.now())
 
     return next(e)
   })
@@ -133,6 +139,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const silencio = await espiarSilencio($)
+    await read($, silencioFim) // só assina: a expiração do silêncio redesenha a faixa
     const f = estadoFaixa(
       await read($, atencao),
       silencio.ok ? silencio.valor : null,
@@ -144,6 +151,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    await read($, silencioFim) // só assina: a expiração do silêncio redesenha o painel
     const linhas = modeloDetalhes(await entradaDetalhes($, true))
     return painel($.ui.resolve(e), linhas, config !== null, async a => {
       await executar($, a)
@@ -192,17 +200,22 @@ async function executar($: EngineInterface, a: Acao): Promise<string> {
         break
       }
       const ate = await silenciar($, a === 'silenciar-1h' ? '1h' : 'amanha', agora, c.inicio)
+      if (ate !== null) armarSilencio($, ate, agora)
       texto = ate === null ? await falhaDeDados($, 'silenciar') : `Silenciado até ${hora(ate)}.`
       break
     }
     case 'reativar':
-      texto = (await reativar($, agora)) ? 'Silêncio encerrado.' : await falhaDeDados($, 'reativar')
+      if (await reativar($, agora)) {
+        armarSilencio($, null, agora)
+        texto = 'Silêncio encerrado.'
+      } else texto = await falhaDeDados($, 'reativar')
       break
     case 'apagar-dados':
       texto = TEXTO_APAGAR
       break
     case 'apagar-confirmar':
       await apagarDados($)
+      armarSilencio($, null, agora)
       mostrarErroDeConfig($)
       texto = 'Dados apagados: livro, silencio, explicado e diario.'
       break
@@ -318,6 +331,18 @@ async function subiuNivel($: EngineInterface, nivel: Nivel, t: number): Promise<
     await update($, explicar, () => true)
     await marcarExplicado($, t)
   }
+}
+
+// D8: na hora `ate` grava `silencioFim`, que a faixa lê; sem silêncio ativo, só cancela.
+// Armado em session.start, silenciar, reativar e apagar-dados desta janela; um silêncio de outra
+// janela aparece aqui no próximo desenho.
+function armarSilencio($: EngineInterface, ate: number | null, agora: number): void {
+  timerSilencio?.cancel()
+  timerSilencio = null
+  if (ate === null || agora >= ate) return
+  timerSilencio = $.clock.after(ate - agora, () => {
+    void update($, silencioFim, () => ate)
+  })
 }
 
 // D4: fecha a sessão em `ultimaID + fimAtencao`; rearmado a cada mudança e em session.start.
