@@ -1,8 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Sessao } from '../types'
-import { aplicarID, expirou, medir, registroFechado, registroVivo, renovar } from './atencao'
+import type { Objetivo, Sessao } from '../types'
+import { aplicarID, expirou, intervalosDe, medir, registroFechado, registroVivo, renovar } from './atencao'
 import { resolverConfig, versaoAtende, type ConfigResolvida } from './config'
 import {
   apagarDados,
@@ -10,13 +10,16 @@ import {
   chavesAntigas,
   erroCorrente,
   espiarLivro,
+  gravarEventosObjetivo,
   gravarRegistro,
   iniciarLivro,
   lerLivro,
+  lerObjetivos,
   registrarErro,
   verificarDados,
   type Livro,
 } from './livro'
+import { abertoSemTexto, aplicarTransicao, temTimebox, tempoAtivoSeg, type Mutacao } from './objetivo'
 import {
   faixa,
   interpretar,
@@ -24,6 +27,7 @@ import {
   painel,
   TEXTO_APAGAR,
   textoDetalhes,
+  textoObjetivo,
   TITULO,
   USO,
   type Acao,
@@ -40,6 +44,8 @@ const TICK_MS = 60_000
 const atencao = atom({ plugin: 'harness-session-guard', key: 'atencao' } as const, null, { shape: 'atencao-2' })
 // D-T7: instante do último tick; a faixa e o painel o leem para redesenhar o relógio.
 const pulso = atom({ plugin: 'harness-session-guard', key: 'pulso' } as const, 0, { shape: 'pulso-1' })
+// D-O1: o objetivo aberto, com texto e DoD; só aqui e nunca no armazenamento persistente.
+const objetivo = atom({ plugin: 'harness-session-guard', key: 'objetivo' } as const, null, { shape: 'objetivo-1' })
 
 // Estado do módulo: recomeça a cada reload e é refeito em session.start.
 // `config` null = o mod não mede (versão ou configuração com erro, em `erro`; código curto em `erroCodigo`).
@@ -74,10 +80,11 @@ export const register: Register = (on, options) => {
     mostrarErroDeConfig($)
     await $.command.register({
       name: COMANDO,
-      description: 'harness-session-guard: detalhes da sessão de atenção e dados',
-      argumentHint: '[apagar-dados [confirmar]]',
+      description: 'harness-session-guard: detalhes da sessão de atenção, objetivo e dados',
+      argumentHint: '[objetivo [abrir|trocar|dod|fechar] ... | apagar-dados [confirmar]]',
     })
     await retomar($)
+    await fecharObjetivosSemTexto($)
     armarTick($)
 
     return next(e)
@@ -144,24 +151,63 @@ async function abrirDetalhes($: EngineInterface): Promise<void> {
 // Fluxo: ação em livro.ts → registro de ID. Devolve o texto do `/hsg`.
 async function executar($: EngineInterface, a: Acao): Promise<string> {
   let texto: string
-  switch (a) {
-    case 'uso':
-      texto = USO
-      break
-    case 'detalhes':
-      texto = textoDetalhes(modeloDetalhes(await entradaDetalhes($, false)))
-      break
-    case 'apagar-dados':
-      texto = TEXTO_APAGAR
-      break
-    case 'apagar-confirmar':
-      await apagarDados($)
-      mostrarErroDeConfig($)
-      texto = `Dados apagados: ${CHAVES_APAGAR.join(', ')}.`
-      break
+  if (typeof a === 'object') texto = await executarObjetivo($, a.objetivo)
+  else {
+    switch (a) {
+      case 'uso':
+        texto = USO
+        break
+      case 'detalhes':
+        texto = textoDetalhes(modeloDetalhes(await entradaDetalhes($, false)))
+        break
+      case 'apagar-dados':
+        texto = TEXTO_APAGAR
+        break
+      case 'apagar-confirmar':
+        await apagarDados($)
+        mostrarErroDeConfig($)
+        texto = `Dados apagados: ${CHAVES_APAGAR.join(', ')}.`
+        break
+    }
   }
   await registrarID($)
   return texto
+}
+
+// D-O2/D-O3: valida a transição, grava os eventos no store e só então muda o atom `objetivo`.
+async function executarObjetivo($: EngineInterface, c: Mutacao | { tipo: 'ver' }): Promise<string> {
+  if (config === null) return `Indisponível: ${erro} · /hsg`
+  const atual = await read($, objetivo)
+  if (c.tipo === 'ver') return textoObjetivo(atual)
+  const t = await $.clock.now()
+  const r = aplicarTransicao(atual, c, t, await $.session.id())
+  if (!r.ok) return r.mensagem
+  if (r.eventos.length > 0 && !(await gravarEventosObjetivo($, r.eventos, t))) return falhaDeDados($)
+  await update($, objetivo, () => r.objetivo)
+  return r.mensagem
+}
+
+// Uma gravação recusada sempre deixa o erro corrente (livro.ts `falhar`); sem ele, o invariante quebrou.
+async function falhaDeDados($: EngineInterface): Promise<string> {
+  const e = await erroCorrente($)
+  if (e === null) throw new Error('harness-session-guard: o objetivo não gravou e não há erro corrente')
+  const acao = e.codigo.startsWith('dados-incompativeis:') ? '/hsg apagar-dados confirmar' : '/hsg'
+  return `Não foi possível gravar o objetivo: ${e.codigo} · ${acao}`
+}
+
+// D-O4: com o atom vazio (processo reiniciado ou --resume), cada objetivo aberto no store vira `trocar`/`reinicio`.
+async function fecharObjetivosSemTexto($: EngineInterface): Promise<void> {
+  if (config === null) return
+  const objetivos = await lerObjetivos($)
+  if (objetivos === null) return
+  const abertos = abertoSemTexto(objetivos.eventos, await read($, objetivo))
+  if (abertos.length === 0) return
+  const t = await $.clock.now()
+  await gravarEventosObjetivo(
+    $,
+    abertos.map(objetivoId => ({ t, tipo: 'trocar' as const, objetivoId, motivo: 'reinicio' as const })),
+    t,
+  )
 }
 
 // `noDesenho`: dentro do `ui.render` lê sem relatar (gravar no `$.state` ali é recusado) e mostra a
@@ -179,6 +225,7 @@ async function entradaDetalhes($: EngineInterface, noDesenho: boolean): Promise<
   const e = await erroCorrente($)
   return {
     sessao: await read($, atencao),
+    objetivo: await read($, objetivo),
     livro,
     antigas: await chavesAntigas($),
     erro: erro ?? (e === null ? incompativel : `${e.codigo}${e.detalhe === null ? '' : `: ${e.detalhe}`}`),
@@ -269,4 +316,18 @@ async function aoTick($: EngineInterface): Promise<void> {
   await update($, pulso, () => t)
   const s = await read($, atencao)
   if (s !== null) await gravarRegistro($, registroVivo(s, t), t)
+  const o = await read($, objetivo)
+  if (o !== null) await verificarTimebox($, o, t)
+}
+
+// D-T7(c): grava `timebox` uma única vez, quando o tempo ativo do objetivo (união dos registros do livro, já
+// atualizado pelo registro vivo do tick) chega ao timebox.
+async function verificarTimebox($: EngineInterface, o: Objetivo, t: number): Promise<void> {
+  if (o.timeboxMin === null) return
+  const livro = await lerLivro($)
+  if (livro === null) return
+  if (tempoAtivoSeg(intervalosDe(livro.sessoes, null, t), o.abertoEm, t) < o.timeboxMin * 60) return
+  const objetivos = await lerObjetivos($)
+  if (objetivos === null || temTimebox(objetivos.eventos, o.id)) return
+  await gravarEventosObjetivo($, [{ t, tipo: 'timebox', objetivoId: o.id, timeboxMin: o.timeboxMin }], t)
 }

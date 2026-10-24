@@ -62,9 +62,14 @@ export function medir(s: Sessao | null, registros: readonly Registro[], agora: n
 // D-T6: união dos intervalos dos registros (todas as janelas) mais o intervalo vivo desta janela,
 // cortada em [00:00 local de `agora`, `agora`]. A sessão viva de outra janela entra só pelo último registro gravado.
 export function totalDiaSeg(registros: readonly Registro[], viva: Sessao | null, agora: number): number {
+  return uniaoSeg(intervalosDe(registros, viva, agora), diaLocalInicio(agora), agora)
+}
+
+// Os intervalos [ini, fim] dos registros mais, se houver, o intervalo vivo [ini, agora] desta janela.
+export function intervalosDe(registros: readonly Registro[], viva: Sessao | null, agora: number): (readonly [number, number])[] {
   const intervalos: (readonly [number, number])[] = registros.map(r => [r.ini, r.fim])
   if (viva !== null) intervalos.push([viva.ini, agora])
-  return uniaoSeg(intervalos, diaLocalInicio(agora), agora)
+  return intervalos
 }
 
 // Comprimento, em segundos, da união dos intervalos cortados em [de, ate].

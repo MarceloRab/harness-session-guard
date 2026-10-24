@@ -6,10 +6,18 @@ import type { EngineInterface } from 'claude-code'
 import type { ErroDados } from '../types'
 import type { Registro } from './atencao'
 import type { CampoConfig } from './config'
+import type { EventoObjetivo } from './objetivo'
 
-export type Chave = 'livro'
+export type Chave = 'livro' | 'objetivos'
 export type Livro = { formato: 2; sessoes: Registro[] }
-export type Codigo = 'versao' | `config:${CampoConfig}` | `dados-incompativeis:${Chave}` | 'livro-cheio' | 'store-recusou'
+export type Objetivos = { formato: 1; eventos: EventoObjetivo[] }
+export type Codigo =
+  | 'versao'
+  | `config:${CampoConfig}`
+  | `dados-incompativeis:${Chave}`
+  | 'livro-cheio'
+  | 'objetivos-cheio'
+  | 'store-recusou'
 export type Leitura<V> = { ok: true; valor: V } | { ok: false; codigo: Codigo }
 
 // Formato 1 do M2: o registro tinha mais campos; a migração (D-P2) os descarta.
@@ -43,14 +51,32 @@ const LIVRO: Desc<Livro> = {
   cheio: 'livro-cheio',
 }
 
+// D-O3: eventos de objetivo, sem texto. Poda: os eventos de um objetivo saem quando o último deles tem mais de 30 dias.
+const OBJETIVOS: Desc<Objetivos> = {
+  chave: 'objetivos',
+  validar: validarObjetivos,
+  migrar: null,
+  vazio: () => ({ formato: 1, eventos: [] }),
+  podar: (v, agora) => {
+    const ultimo = new Map<string, number>()
+    for (const e of v.eventos) ultimo.set(e.objetivoId, Math.max(ultimo.get(e.objetivoId) ?? e.t, e.t))
+    return { ...v, eventos: v.eventos.filter(e => (ultimo.get(e.objetivoId) as number) >= agora - TRINTA_DIAS_MS) }
+  },
+  cheio: 'objetivos-cheio',
+}
+
 // Erro corrente num atom: a faixa o lê e redesenha quando ele muda. Zerado em `iniciarLivro`.
 const erroAtom = atom({ plugin: 'harness-session-guard', key: 'erro' } as const, null, { shape: 'erro-1' })
+
+// Estado do módulo: refeito em `iniciarLivro` (session.start).
+let debug = false
 
 // ---------- API (register.tsx e tracks seguintes) ----------
 
 // D-P6: com `HSG_DEBUG=1`, registra o fuso local no log (não vai para o store).
 export async function iniciarLivro($: EngineInterface): Promise<void> {
-  if ((await $.env.get('HSG_DEBUG')) === '1') $.ui.log(`harness-session-guard tz=${new Date().getTimezoneOffset()}`)
+  debug = (await $.env.get('HSG_DEBUG')) === '1'
+  if (debug) $.ui.log(`harness-session-guard tz=${new Date().getTimezoneOffset()}`)
   await update($, erroAtom, () => null)
 }
 
@@ -58,14 +84,12 @@ export async function erroCorrente($: EngineInterface): Promise<ErroDados | null
   return read($, erroAtom)
 }
 
-// Em session.start: o livro é lido e, se rejeitado, relatado fora do desenho. Um formato 1 válido é
-// persistido como formato 2 aqui (D-P2).
+// Em session.start: o livro e os objetivos são lidos e, se rejeitados, relatados fora do desenho.
+// Um livro formato 1 válido é persistido como formato 2 aqui (D-P2).
 export async function verificarDados($: EngineInterface): Promise<void> {
-  if (validarLivroV1(await $.store.get(LIVRO.chave))) {
-    await gravar($, LIVRO, await $.clock.now(), v => v)
-    return
-  }
-  await ler($, LIVRO)
+  if (validarLivroV1(await $.store.get(LIVRO.chave))) await gravar($, LIVRO, await $.clock.now(), v => v)
+  else await ler($, LIVRO)
+  await ler($, OBJETIVOS)
 }
 
 // D-P3: as chaves do formato antigo presentes no store, para o aviso do `/hsg`.
@@ -86,6 +110,22 @@ export async function lerLivro($: EngineInterface): Promise<Livro | null> {
 // Upsert do registro pelo `id`, relendo o livro antes da gravação.
 export async function gravarRegistro($: EngineInterface, r: Registro, agora: number): Promise<void> {
   await gravar($, LIVRO, agora, v => upsert(v, r))
+}
+
+export async function lerObjetivos($: EngineInterface): Promise<Objetivos | null> {
+  return ler($, OBJETIVOS)
+}
+
+// D-O3: acrescenta os eventos de uma transição num único `gravar`. Devolve `true` só se gravou.
+// D-P6: com `HSG_DEBUG=1`, só o `tipo` de cada evento vai ao log.
+export async function gravarEventosObjetivo(
+  $: EngineInterface,
+  eventos: readonly EventoObjetivo[],
+  agora: number,
+): Promise<boolean> {
+  const gravou = await gravar($, OBJETIVOS, agora, v => ({ ...v, eventos: [...v.eventos, ...eventos] }))
+  if (gravou && debug) $.ui.log(`harness-session-guard objetivos ${eventos.map(e => e.tipo).join(',')}`)
+  return gravou
 }
 
 // `/hsg apagar-dados confirmar`: remove as chaves de `CHAVES_APAGAR` e limpa o erro de dados.
@@ -126,6 +166,28 @@ export function validarLivroV1(x: unknown): x is LivroV1 {
     x.formato === 1 &&
     Array.isArray(x.sessoes) &&
     x.sessoes.every(validarRegistroV1)
+  )
+}
+
+export function validarObjetivos(x: unknown): x is Objetivos {
+  return (
+    objetoCom(x, ['formato', 'eventos']) &&
+    x.formato === 1 &&
+    Array.isArray(x.eventos) &&
+    x.eventos.every(validarEventoObjetivo)
+  )
+}
+
+function validarEventoObjetivo(x: unknown): x is EventoObjetivo {
+  if (typeof x !== 'object' || x === null || Array.isArray(x)) return false
+  const o = x as Record<string, unknown>
+  return (
+    Object.keys(o).every(k => k === 't' || k === 'tipo' || k === 'objetivoId' || k === 'timeboxMin' || k === 'motivo') &&
+    numero(o.t) &&
+    (o.tipo === 'abrir' || o.tipo === 'trocar' || o.tipo === 'fechar' || o.tipo === 'timebox') &&
+    typeof o.objetivoId === 'string' &&
+    (!('timeboxMin' in o) || (Number.isSafeInteger(o.timeboxMin) && (o.timeboxMin as number) >= 1)) &&
+    (!('motivo' in o) || o.motivo === 'reinicio')
   )
 }
 

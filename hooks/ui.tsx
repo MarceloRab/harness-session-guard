@@ -1,19 +1,21 @@
 // Emissão (mod-v2 D-T10): um modelo de detalhes puro e as árvores/textos que saem dele.
 import type { EngineInterface } from 'claude-code'
 
-import type { Sessao } from '../types'
-import { formatarRelogio, medir, sessaoSeg, type Cor, type Medida } from './atencao'
+import type { Objetivo, Sessao } from '../types'
+import { formatarRelogio, intervalosDe, medir, sessaoSeg, type Cor, type Medida } from './atencao'
 import type { ConfigResolvida } from './config'
 import { CHAVES_APAGAR, type Livro } from './livro'
+import { parsearObjetivo, tempoAtivoSeg, type ComandoObjetivo } from './objetivo'
 
 export const TITULO = 'harness-session-guard'
 
-export type Acao = 'detalhes' | 'apagar-dados' | 'apagar-confirmar' | 'uso'
+export type Acao = 'detalhes' | 'apagar-dados' | 'apagar-confirmar' | 'uso' | { objetivo: ComandoObjetivo }
 
 export type Linha = { texto: string; fraco: boolean }
 
 export type EntradaDetalhes = {
   sessao: Sessao | null
+  objetivo: Objetivo | null
   livro: Livro | null
   antigas: readonly string[]
   erro: string | null
@@ -30,6 +32,11 @@ const COR: Record<Exclude<Cor, 'neutra'>, string> = { laranja: '#ff8700', vermel
 export const USO = [
   'Uso:',
   '  /hsg                         detalhes da sessão de atenção',
+  '  /hsg objetivo                mostra o objetivo e o DoD abertos',
+  '  /hsg objetivo abrir [timebox=<min>] <texto>   abre um objetivo',
+  '  /hsg objetivo trocar [timebox=<min>] <texto>  fecha o atual como troca e abre outro',
+  '  /hsg objetivo dod <texto>    define o DoD do objetivo aberto',
+  '  /hsg objetivo fechar         fecha o objetivo (conta como avanço)',
   '  /hsg apagar-dados            explica o que é apagado',
   '  /hsg apagar-dados confirmar  apaga os dados do harness-session-guard',
 ].join('\n')
@@ -43,6 +50,11 @@ export const TEXTO_APAGAR = [
 
 // Argumentos exatos; qualquer outro texto é `uso`, sem ação.
 export function interpretar(args: string): Acao {
+  const objetivo = /^objetivo(?:\s+([\s\S]*))?$/.exec(args.trim())
+  if (objetivo !== null) {
+    const c = parsearObjetivo(objetivo[1] ?? '')
+    return c === null ? 'uso' : { objetivo: c }
+  }
   switch (args.trim().split(/\s+/).join(' ')) {
     case '':
       return 'detalhes'
@@ -59,7 +71,9 @@ export function interpretar(args: string): Acao {
 export function modeloDetalhes(x: EntradaDetalhes): Linha[] {
   const linhas: Linha[] = []
   const l = (texto: string, fraco = false) => linhas.push({ texto, fraco })
-  if (x.erro !== null) l(`Erro: ${x.erro} · /hsg`)
+  if (x.erro !== null) {
+    l(`Erro: ${x.erro} · ${x.erro.startsWith('dados-incompativeis:') ? '/hsg apagar-dados confirmar' : '/hsg'}`)
+  }
   if (x.antigas.length > 0) l(`Dados antigos sem uso: ${x.antigas.join(', ')} · /hsg apagar-dados`, true)
   const c = x.config
   if (c === null) return linhas
@@ -74,6 +88,7 @@ export function modeloDetalhes(x: EntradaDetalhes): Linha[] {
       ? 'Total do dia: indisponível (dados incompatíveis · /hsg apagar-dados confirmar)'
       : `Total do dia: pelo menos ${formatarRelogio(medir(x.sessao, x.livro.sessoes, x.agora, c).diaSeg)}`,
   )
+  if (x.objetivo !== null) l(linhaObjetivo(x.objetivo, x.livro, x.sessao, x.agora))
   l(
     `Ao fechar, a sessão termina na última interação: o relógio pode recuar até ${c.fimAtencaoSeg / 60} min.`,
     true,
@@ -85,6 +100,16 @@ export function modeloDetalhes(x: EntradaDetalhes): Linha[] {
   return linhas
 }
 
+// `/hsg objetivo`: o único lugar, além do atom, onde o texto e o DoD aparecem.
+export function textoObjetivo(o: Objetivo | null): string {
+  if (o === null) return 'Nenhum objetivo aberto.'
+  return [
+    `Objetivo: ${o.texto}`,
+    `DoD: ${o.dod ?? 'não definido (/hsg objetivo dod <texto>)'}`,
+    `Aberto às ${hora(o.abertoEm)} · ${o.timeboxMin === null ? 'sem timebox' : `timebox ${o.timeboxMin} min`}`,
+  ].join('\n')
+}
+
 export function textoDetalhes(linhas: readonly Linha[]): string {
   return linhas.map(x => x.texto).join('\n')
 }
@@ -92,6 +117,16 @@ export function textoDetalhes(linhas: readonly Linha[]): string {
 export function hora(t: number): string {
   const d = new Date(t)
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+// Painel e `/hsg`: sem o texto do objetivo, só o id curto e o tempo ativo (pelo menos: o livro é o piso).
+function linhaObjetivo(o: Objetivo, livro: Livro | null, viva: Sessao | null, agora: number): string {
+  const ativo =
+    livro === null
+      ? 'indisponível (dados incompatíveis)'
+      : `pelo menos ${formatarRelogio(tempoAtivoSeg(intervalosDe(livro.sessoes, viva, agora), o.abertoEm, agora))}`
+  const timebox = o.timeboxMin === null ? '' : ` · timebox ${o.timeboxMin} min`
+  return `Objetivo aberto às ${hora(o.abertoEm)} (id ${o.id.slice(0, 8)}) · tempo ativo: ${ativo}${timebox}`
 }
 
 // ---------- Árvores ----------
