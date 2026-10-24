@@ -1,0 +1,6 @@
+{
+  "name": "harness-session-guard",
+  "owner": { "name": "MarceloRab" },
+  "description": "Marketplace do mod harness-session-guard para o Claude Code.",
+  "plugins": [{ "name": "harness-session-guard", "source": "./" }]
+}

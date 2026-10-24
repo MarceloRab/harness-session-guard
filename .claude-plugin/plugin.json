@@ -1,0 +1,47 @@
+{
+  "name": "harness-session-guard",
+  "version": "0.1.0",
+  "description": "Mede a sua atenção ao agente no Claude Code e avisa, com discrição, sobre sessões longas, sem pausa ou fora do expediente.",
+  "author": { "name": "MarceloRab" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "inicio": {
+      "type": "number",
+      "title": "Início do expediente (hora, 0-23)",
+      "description": "Interações antes desta hora contam como fora do expediente.",
+      "default": 6
+    },
+    "fim": {
+      "type": "number",
+      "title": "Fim do expediente (hora, 1-24)",
+      "description": "Interações a partir desta hora contam como fora do expediente. Precisa ser maior que o início.",
+      "default": 22
+    },
+    "dias": {
+      "type": "string",
+      "title": "Dias de trabalho",
+      "description": "Interações em outros dias contam como fora do expediente.",
+      "options": ["seg-sex", "seg-sab", "todos"],
+      "default": "seg-sex"
+    },
+    "intensidade": {
+      "type": "string",
+      "title": "Intensidade dos alertas",
+      "description": "discreto: 3h sem pausa / 4h30 longa; padrao: 2h / 3h; rigido: 1h30 / 2h15 (provisório).",
+      "options": ["discreto", "padrao", "rigido"],
+      "default": "padrao"
+    },
+    "fimAtencaoMin": {
+      "type": "number",
+      "title": "Avançado: minutos sem interação que encerram a atenção",
+      "description": "Inteiro, 1 ou mais.",
+      "default": 60
+    },
+    "pausaMinMin": {
+      "type": "number",
+      "title": "Avançado: minutos sem interação que contam como pausa",
+      "description": "Inteiro, 1 ou mais, menor que o fim da atenção.",
+      "default": 15
+    }
+  }
+}
