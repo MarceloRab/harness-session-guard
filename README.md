@@ -62,8 +62,9 @@ O `timebox` é um inteiro ≥ 1. `apagar-dados confirmar` também encerra o obje
 ### Limites
 
 - Um `/hsg` digitado durante um turno do agente espera o fim do turno.
-- A linha do `/hsg avaliar` aparece depois da resposta do juiz (até 180 s).
+- A linha do `/hsg avaliar` aparece depois da resposta do juiz (até 180 s); sem turno novo, o juiz não é chamado e a linha aparece logo.
 - Não há gatilho automático nem nova tentativa.
+- Limite conhecido: depois de reiniciar ou de zerar a memória da sessão, o juiz recebe os achados já apontados no objetivo e pode deixar de repetir um achado que ainda vale.
 
 ## Configuração
 
@@ -104,7 +105,7 @@ Limites conhecidos: um turno que nunca recebe o seu fim mantém a sessão aberta
 
 Só `/hsg avaliar` avalia (o clique na C apenas o escreve na caixa). Não há gatilho automático, nova tentativa automática nem recuo.
 
-**Camada 1 (sem tokens, sem modelo)**, por objetivo ou, sem objetivo, pela sessão viva: tempo ativo, commits na janela (assuntos), ciclos de refinamento ("pelo menos"), tempo desde o último avanço (commit ou fechamento), timebox, turnos do dev, edições ("pelo menos"), compactações do contexto. Uma fonte que falha aparece como "indisponível (motivo)" na linha do fato, nunca como zero.
+**Camada 1 (sem tokens, sem modelo)**, por objetivo ou, sem objetivo, pela sessão viva: tempo ativo, commits na janela (assuntos), ciclos de refinamento ("pelo menos"), tempo desde o último avanço (commit ou fechamento), timebox, turnos do dev, edições ("pelo menos"), compactações do contexto. A linha mostra numa linha só o escopo, o tempo ativo, o número de commits, o último avanço, os ciclos e o timebox; os demais fatos (assuntos, turnos, edições) vão ao juiz. Uma fonte que falha aparece como "<fato> indisponível (motivo)" na posição do fato, nunca como zero.
 
 **Juiz cego** (só com objetivo **e** DoD): uma chamada a `claude-sonnet-5-5`, esforço médio, sem histórico, com a rubrica **v2**. Quatro dimensões, cada uma com nível 0, 1 ou 2: DoD, suposição, tangente e afirmação sem lastro. Cada achado vem com uma citação literal, que o mod confere contra a evidência enviada; achado com citação não encontrada é descartado e contado. O juiz não produz sugestão: só nível e citação. Cada achado (nível 1 ou 2, não descartado) tem votos (útil, não se aplica, errado). Um achado já apontado antes, no mesmo objetivo, aparece como "já apontado".
 
@@ -114,12 +115,28 @@ Só `/hsg avaliar` avalia (o clique na C apenas o escreve na caixa). Não há ga
 - Nunca apaga o rascunho: com texto na caixa, acrescenta uma linha em branco e o template depois dele. Nunca envia: você revisa e aperta Enter.
 - Se o template não puder ser escrito, a linha mostra "Aviso: o prompt não foi preenchido" com o motivo.
 
-- Com a mesma entrada da avaliação anterior e o resultado ainda na memória, o mod mostra o resultado guardado, sem chamar o modelo ("resultado guardado, sem custo").
+**Juiz só com turno novo.** O juiz só é chamado quando há turno novo desde a última avaliação ok do mesmo objetivo; a avaliação seguinte pede que ele avalie a partir do turno seguinte ao último avaliado.
+
+- Sem turno novo, a linha diz `Sem turnos novos desde a avaliação das HH:MM: resultado do juiz mantido, sem nova chamada.`: o resultado anterior continua na tela, sem custo novo e sem gravar nada no armazenamento.
+- Um commit sem turno novo atualiza só a camada 1: o juiz avalia os turnos do agente.
+- Uma avaliação feita com um turno do agente em andamento julga esse turno, que volta a ser avaliado na próxima.
+- Depois de reiniciar o Claude Code (objetivo reaberto), ou quando a memória da sessão foi zerada, a primeira avaliação chama o juiz desde o primeiro turno do objetivo: o resultado do juiz não é guardado no armazenamento.
+- Uma avaliação com erro não conta: pode ser pedida de novo com `/hsg avaliar`. Não há nova tentativa automática.
+- Antes da regra do turno novo vale um caso estreito: entrada idêntica à da última chamada (o mesmo hash) com o resultado ok ainda na memória; então a linha diz "Resultado guardado, sem custo: a entrada não mudou desde a última avaliação.".
 - Um `/hsg avaliar` durante uma chamada em andamento responde "Avaliação em andamento." e não dispara outra.
+
+**A linha do `/hsg avaliar` no feed**, de cima para baixo:
+
+1. A camada 1 numa linha; abaixo, esmaecidas, só quando houver: histórico compactado, prompts sem mensagem correspondente, mensagens do dev sem registro. Depois, as linhas de estado (aviso, avaliação em andamento, resultado guardado, sem turnos novos, gravação recusada).
+2. Os eixos **DoD**, **Suposição**, **Tangente** e **Sem lastro**, cada um na sua cor, com o nível, um resumo fixo do nível, a citação curta (até 160 caracteres) embaixo e os votos (`útil`, `não se aplica`, `errado`) quando há achado.
+3. O laudo, em negrito: `Laudo: ruim · nível 2 em …`, `Laudo: atenção · indício em …`, `Laudo: sem apontamentos` ou `Laudo: indisponível · <motivo>` (entrada não montada, juiz com erro ou sem resposta).
+4. As sugestões de prompt, quando a avaliação é ruim.
+5. O rodapé esmaecido: `Custo do juiz às HH:MM: input … · cache_read … · cache_creation … · output … · fora do /usage · não vê CLAUDE.md nem skills · não determinístico` (sem juiz na tela, só o aviso fixo) e o contexto da sessão.
+
 - O juiz **não vê CLAUDE.md nem skills**: um DoD que remete a eles não é verificável.
-- A chamada **não entra no custo da sessão nem no `/usage`**; a linha mostra o custo da última avaliação (`input`, `cache_read`, `cache_creation`, `output`) e o uso do contexto da sessão.
+- A chamada **não entra no custo da sessão nem no `/usage`**.
 - **O resultado não é determinístico**: o modelo julga a conversa.
-- `/hsg entrada` mostra no feed a entrada exata enviada (os blocos e o hash). Sem objetivo e DoD, a entrada não é montada e a linha diz o motivo.
+- `/hsg entrada` mostra no feed a entrada exata enviada (os blocos e o hash); o hash só aparece ali. Sem objetivo e DoD, a entrada não é montada e a linha diz o motivo.
 
 ## Privacidade
 
