@@ -54,7 +54,57 @@ export type Calculo = { tipo: 'nada' } | { tipo: 'fatos'; fatos: Fatos }
 export type Bloco = { text: string; cache?: true }
 
 // D-P4/D-J11: a última entrada do juiz (ou o motivo de não montar); só `$.state`. `t` não entra no hash.
-export type EntradaC = { t: number } & ({ ok: true; blocos: Bloco[]; hash: string } | { ok: false; motivo: string })
+// `evidencia` = os itens de texto (prompt digitado e texto do agente, normalizados) realmente enviados: a base da C1.
+export type EntradaC = { t: number } & (
+  | { ok: true; blocos: Bloco[]; hash: string; evidencia: string[] }
+  | { ok: false; motivo: string }
+)
+
+// D-J2/D-J13.
+export type Dimensao = 'dod' | 'suposicao' | 'tangente' | 'semLastro'
+export type Voto = 'util' | 'nao-se-aplica' | 'errado'
+export type Usage = {
+  input_tokens: number
+  output_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+}
+
+// D-J9: um achado do juiz (nível 1 ou 2, com citação). `h` = 12 hex do SHA-256 da citação normalizada (Y3).
+// `descartado` = a C1 não achou a citação na evidência enviada. `voto` = o último U2 deste achado nesta tela.
+export type Achado = {
+  dim: Dimensao
+  h: string
+  nivel: 1 | 2
+  citacao: string
+  sugestao?: string
+  estado: 'novo' | 'ja-apontado' | 'descartado'
+  voto?: Voto
+}
+
+// D-P4: o resultado do juiz; só `$.state`. `reutilizado` = hash igual ao da avaliação anterior, sem chamada.
+// `gravacao` = o código do erro se a escrita em `avaliacoes` falhou (a avaliação continua visível).
+export type Juiz = {
+  hash: string
+  t: number
+  resultado: 'ok' | 'json-invalido' | 'api-error' | 'empty-reply' | 'aborted'
+  achados: Achado[]
+  // null = a chamada foi recusada antes de enviar (nenhum custo medido; nada é inventado).
+  usage: Usage | null
+  motivo?: string
+  reutilizado?: true
+  gravacao?: string
+}
+
+// D-C-UI/D-J10: o que a tela da C lê. `andamento` = chamada ao modelo em curso. `contexto` = C6 (informativo).
+export type ResultadoC = {
+  calculo: Calculo
+  juiz: Juiz | null
+  andamento: boolean
+  // Falha de U1 (prompt não preenchido) ou de U2 (voto não gravado), com o motivo.
+  aviso?: string
+  contexto: Dado<{ tokens: number | null; window: number; percent: number | null }>
+}
 
 declare module 'claude-code' {
   interface PluginState {
@@ -70,8 +120,8 @@ declare module 'claude-code' {
       prompts: Shaped<PromptRegistro[]>
       // shape 'compactacoes-1' (D-C6): horário de cada compactação manual, automática ou de plugin.
       compactacoes: Shaped<number[]>
-      // shape 'resultadoC-1' (D-C-UI): último cálculo da camada 1; null = nenhum ainda.
-      resultadoC: Shaped<Calculo | null>
+      // shape 'resultadoC-2' (D-C-UI, D-P4): camada 1, resultado do juiz e C6; null = nenhum ainda.
+      resultadoC: Shaped<ResultadoC | null>
       // shape 'entradaC-1' (D-P4): última entrada do juiz montada pelo clique na C ou por `/hsg avaliar`.
       entradaC: Shaped<EntradaC | null>
     }

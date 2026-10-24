@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, Timer } from 'claude-code'
+import type { EngineInterface, ModelCompleteResult, Register, Timer } from 'claude-code'
 
-import type { Calculo, Commit, Dado, EntradaC, Objetivo, Sessao } from '../types'
+import type { Achado, Calculo, Commit, Dado, EntradaC, Fatos, Juiz, Objetivo, ResultadoC, Sessao, Voto } from '../types'
 import { aplicarID, expirou, intervalosDe, iniciarTurno, medir, registroEm, renovar } from './atencao'
 import { resolverConfig, versaoAtende, type ConfigResolvida } from './config'
 import {
@@ -15,14 +15,18 @@ import {
   type Janela,
   type MensagensCasadas,
 } from './fatos'
-import { montarEntrada, MOTIVO_SEM_OBJETIVO } from './entrada'
+import { jaApontados, montarEntrada, MOTIVO_SEM_OBJETIVO, PARAMETROS_JUIZ } from './entrada'
+import { aplicarY3, conferirCitacoes, parsearResposta } from './resultado'
 import {
   apagarDados,
   CHAVES_APAGAR,
   chavesAntigas,
   erroCorrente,
   espiarLivro,
+  gravarAchados,
+  gravarClique,
   gravarEventosObjetivo,
+  gravarFeedback,
   gravarRegistro,
   iniciarLivro,
   lerAvaliacoes,
@@ -30,16 +34,22 @@ import {
   lerObjetivos,
   registrarErro,
   verificarDados,
+  type AchadoGravado,
+  type Avaliacoes,
+  type CliqueAvaliacao,
   type Livro,
+  type ObjetivoAvaliado,
 } from './livro'
 import { aplicarTransicao, temTimebox, tempoAtivoSeg, type Mutacao } from './objetivo'
 import {
+  achadosDaTela,
   AVISO_OBJETIVO,
   faixa,
   interpretar,
   modeloAvaliacao,
   modeloDetalhes,
   painel,
+  painelAvaliacao,
   TEXTO_APAGAR,
   textoDetalhes,
   textoEntrada,
@@ -66,7 +76,7 @@ const objetivo = atom({ plugin: 'harness-session-guard', key: 'objetivo' } as co
 // D-J3/D-C6/D-C-UI: só `$.state`. `prompts` guarda `len` e `hash` dos prompts digitados (nunca o texto).
 const prompts = atom({ plugin: 'harness-session-guard', key: 'prompts' } as const, [], { shape: 'prompts-1' })
 const compactacoes = atom({ plugin: 'harness-session-guard', key: 'compactacoes' } as const, [], { shape: 'compactacoes-1' })
-const resultadoC = atom({ plugin: 'harness-session-guard', key: 'resultadoC' } as const, null, { shape: 'resultadoC-1' })
+const resultadoC = atom({ plugin: 'harness-session-guard', key: 'resultadoC' } as const, null, { shape: 'resultadoC-2' })
 // D-P4/D-J11: a última entrada do juiz (ou o motivo de não montar); só `$.state`.
 const entradaC = atom({ plugin: 'harness-session-guard', key: 'entradaC' } as const, null, { shape: 'entradaC-1' })
 
@@ -77,6 +87,8 @@ let erro: string | null = null
 let erroCodigo: string | null = null
 let timer: Timer | null = null
 let tick: Timer | null = null
+// D-J1: uma chamada ao juiz por vez; zerado no `finally` do ponto de chamada.
+let emAndamento = false
 
 export const register: Register = (on, options) => {
   const resultado = resolverConfig(options)
@@ -170,7 +182,12 @@ export const register: Register = (on, options) => {
 
   // D-C-UI: o painel só lê o atom; não executa git nem lê mensagens.
   on('ui.render', { component: 'Pane', requestId: PANE_AVALIACAO }, async ($, e) => {
-    return painel($.ui.resolve(e), modeloAvaliacao(await read($, resultadoC), await read($, entradaC)))
+    const r = await read($, resultadoC)
+    const entrada = await read($, entradaC)
+    return painelAvaliacao($.ui.resolve(e), modeloAvaliacao(r, entrada), achadosDaTela(r, entrada), {
+      sugerir: a => sugerir($, a),
+      votar: (a, voto) => votar($, a, voto),
+    })
   })
 
   // `/hsg` e argumentos; cada execução conta como ID.
@@ -191,11 +208,12 @@ async function abrirDetalhes($: EngineInterface): Promise<void> {
   await registrarID($)
 }
 
-// Clique da C: calcula a camada 1, abre o painel e conta como ID.
+// Clique da C: abre o painel (que mostra "em andamento"), avalia e conta como ID. Com uma avaliação em curso,
+// `avaliar` não chama de novo e o painel segue mostrando o andamento.
 async function abrirAvaliacao($: EngineInterface): Promise<void> {
   if (config === null) return
-  await avaliar($)
   await $.ui.open({ id: PANE_AVALIACAO, title: TITULO })
+  await avaliar($)
   await registrarID($)
 }
 
@@ -213,9 +231,10 @@ async function executar($: EngineInterface, a: Acao): Promise<string> {
         break
       case 'avaliar':
         if (config === null) texto = `Indisponível: ${erro} · /hsg`
+        else if (emAndamento) texto = 'Avaliação em andamento.'
         else {
-          const { calculo, entrada } = await avaliar($)
-          texto = textoDetalhes(modeloAvaliacao(calculo, entrada))
+          await avaliar($)
+          texto = textoDetalhes(modeloAvaliacao(await read($, resultadoC), await read($, entradaC)))
         }
         break
       case 'entrada':
@@ -297,14 +316,19 @@ async function guardarCompactacao($: EngineInterface): Promise<void> {
 
 // D-C-UI: lê as fontes (livro, objetivo, sessão, mensagens, git), calcula a camada 1 e guarda o resultado no atom.
 // Chamada só pelo clique na C e por `/hsg avaliar`. Nada vai ao armazenamento persistente.
-// D-J11: monta também a entrada do juiz (sem chamar o modelo) e a guarda no atom `entradaC`.
-async function avaliar($: EngineInterface): Promise<{ calculo: Calculo; entrada: EntradaC }> {
+// D-J11: monta a entrada do juiz e a guarda em `entradaC`. D-J1/D-J8: com entrada montada, chama o juiz uma vez
+// (ou reaproveita o resultado guardado de hash igual). Com uma chamada em curso, não faz nada.
+async function avaliar($: EngineInterface): Promise<void> {
+  if (emAndamento) return
   const o = await read($, objetivo)
   const viva = await read($, atencao)
   const janela = janelaDe(o, null, viva)
   const t = await $.clock.now()
+  const contexto = await contextoC6($)
+  const anterior = (await read($, resultadoC))?.juiz ?? null
   let calculo: Calculo = { tipo: 'nada' }
   let entrada: EntradaC = { t, ok: false, motivo: MOTIVO_SEM_OBJETIVO }
+  let avaliacoes: Avaliacoes | null = null
   if (janela !== null) {
     const livro = await lerLivro($)
     const bruto = await tentar($.session.messages())
@@ -321,17 +345,144 @@ async function avaliar($: EngineInterface): Promise<{ calculo: Calculo; entrada:
       prompts: await read($, prompts),
       compactacoes: await read($, compactacoes),
     })
+    avaliacoes = await lerAvaliacoes($)
     const montada = await montarEntrada({
       objetivo: o,
       fatos: calculo.tipo === 'fatos' ? calculo.fatos : null,
       mensagens,
-      avaliacoes: await lerAvaliacoes($),
+      avaliacoes,
     })
     entrada = montada.ok ? { t, ok: true, ...montada.valor } : { t, ok: false, motivo: montada.motivo }
   }
-  await update($, resultadoC, () => calculo)
   await update($, entradaC, () => entrada)
-  return { calculo, entrada }
+  const base = { calculo, andamento: false, contexto }
+  // D-J8: hash igual e resultado `ok` no `$.state` = o guardado, sem chamada; sem resultado (ou outro hash), chama.
+  if (!entrada.ok || o === null || avaliacoes === null || calculo.tipo !== 'fatos') {
+    await update($, resultadoC, () => ({ ...base, juiz: anterior }))
+    return
+  }
+  if (anterior !== null && anterior.hash === entrada.hash && anterior.resultado === 'ok') {
+    await update($, resultadoC, () => ({ ...base, juiz: { ...anterior, reutilizado: true as const } }))
+    return
+  }
+  const juiz = await julgar($, { entrada, objetivo: o, fatos: calculo.fatos, avaliacoes }, { ...base, juiz: anterior })
+  await update($, resultadoC, () => ({ ...base, juiz }))
+}
+
+type PedidoJuiz = {
+  entrada: Extract<EntradaC, { ok: true }>
+  objetivo: Objetivo
+  fatos: Fatos
+  avaliacoes: Avaliacoes
+}
+
+// D-J1: o ÚNICO ponto que chama o modelo: sem histórico e sem `system`, o bloco de regras com `cache: true`, os
+// parâmetros de `PARAMETROS_JUIZ`; sem nova tentativa. D-J13: grava só números, hashes, `usage` e votos.
+async function julgar($: EngineInterface, p: PedidoJuiz, antes: ResultadoC): Promise<Juiz> {
+  const { model, effort, maxTokens, timeoutMs } = PARAMETROS_JUIZ
+  emAndamento = true
+  let resposta: Dado<ModelCompleteResult>
+  try {
+    await update($, resultadoC, () => ({ ...antes, andamento: true }))
+    resposta = await tentar($.model.complete({ model, effort, maxTokens, timeoutMs, prompt: p.entrada.blocos }))
+  } finally {
+    emAndamento = false
+  }
+  const t = await $.clock.now()
+  const hash = p.entrada.hash
+  // Pedido recusado antes de enviar (ex.: id fora da lista permitida): sem `usage`, nada a gravar.
+  if (!resposta.ok) return { hash, t, resultado: 'api-error', achados: [], usage: null, motivo: resposta.motivo }
+  const r = resposta.valor
+  if (!r.isAnswered) {
+    const motivo = r.reason === 'api-error' ? `status ${r.status ?? 'sem resposta'} · ${r.error}` : undefined
+    const status = r.reason === 'api-error' ? { status: r.status } : {}
+    const gravacao = await gravarResultado($, p, { t, hash, usage: r.usage, resultado: r.reason, citacoesDescartadas: 0, ...status }, [])
+    return { hash, t, resultado: r.reason, achados: [], usage: r.usage, ...(motivo === undefined ? {} : { motivo }), ...gravacao }
+  }
+  const resposta2 = parsearResposta(r.text)
+  if (!resposta2.ok) {
+    const gravacao = await gravarResultado($, p, { t, hash, usage: r.usage, resultado: 'json-invalido', citacoesDescartadas: 0 }, [])
+    return { hash, t, resultado: 'json-invalido', achados: [], usage: r.usage, motivo: resposta2.motivo, ...gravacao }
+  }
+  const { achados: candidatos, descartados } = await conferirCitacoes(resposta2.valor, p.entrada.evidencia)
+  const achados = aplicarY3(candidatos, descartados, jaApontados(p.avaliacoes, p.objetivo))
+  const novos = achados.filter(a => a.estado === 'novo').map(a => ({ dim: a.dim, h: a.h, t }))
+  const clique = { t, hash, usage: r.usage, resultado: 'ok' as const, citacoesDescartadas: descartados.size }
+  const gravacao = await gravarResultado($, p, clique, novos)
+  return { hash, t, resultado: 'ok', achados, usage: r.usage, ...gravacao }
+}
+
+// D-J13: `cliques` + `objetivos` (camada 1, só números) e os achados novos (Y3). Devolve `{ gravacao }` com o código do
+// erro corrente se alguma escrita falhou (a avaliação continua visível, sem persistir); vazio se tudo gravou.
+async function gravarResultado(
+  $: EngineInterface,
+  p: PedidoJuiz,
+  clique: CliqueAvaliacao,
+  novos: readonly AchadoGravado[],
+): Promise<{ gravacao?: string }> {
+  const t = clique.t
+  const gravouClique = await gravarClique($, clique, objetivoAvaliado(p.objetivo, p.fatos, t), t)
+  const gravouAchados = novos.length === 0 || (await gravarAchados($, novos, t))
+  return gravouClique && gravouAchados ? {} : { gravacao: await codigoDoErro($) }
+}
+
+// D-J13: a camada 1 só como números; fonte indisponível não vira zero: sem os quatro números, não há registro.
+function objetivoAvaliado(o: Objetivo, f: Fatos, t: number): ObjetivoAvaliado | null {
+  if (!f.tempoAtivoSeg.ok || !f.ciclos.ok || !f.commits.ok || !f.desdeAvancoSeg.ok) return null
+  return {
+    t,
+    objetivoId: o.id,
+    tAtivoSeg: f.tempoAtivoSeg.valor,
+    ciclos: f.ciclos.valor,
+    commits: f.commits.valor.length,
+    semAvancoSeg: f.desdeAvancoSeg.valor,
+  }
+}
+
+// Uma gravação recusada sempre deixa o erro corrente (livro.ts `falhar`); sem ele, o invariante quebrou.
+async function codigoDoErro($: EngineInterface): Promise<string> {
+  const e = await erroCorrente($)
+  if (e === null) throw new Error('harness-session-guard: a gravação falhou e não há erro corrente')
+  return e.codigo
+}
+
+// D-J10 (C6): o uso do contexto da sessão, informativo; `$.session.usage()` recusado = indisponível com o motivo.
+async function contextoC6($: EngineInterface): Promise<ResultadoC['contexto']> {
+  const r = await tentar($.session.usage())
+  if (!r.ok) return r
+  const c = r.valor.context
+  return { ok: true, valor: { tokens: c.tokens ?? null, window: c.window, percent: c.percent ?? null } }
+}
+
+// D-J10 (U1): escreve a sugestão no campo do prompt e nunca envia.
+async function sugerir($: EngineInterface, a: Achado): Promise<void> {
+  if (a.sugestao === undefined) return
+  const r = await $.prompt.fill({ text: a.sugestao, mode: 'replace' })
+  await avisar($, r.isFilled ? undefined : `o prompt não foi preenchido (${r.refusal ?? 'recusado'})`)
+}
+
+// D-J10 (U2): grava o voto do dev; só marca o achado na tela se gravou.
+async function votar($: EngineInterface, a: Achado, voto: Voto): Promise<void> {
+  const t = await $.clock.now()
+  if (!(await gravarFeedback($, { dim: a.dim, h: a.h, voto, t }, t))) {
+    await avisar($, `voto não gravado: ${await codigoDoErro($)}`)
+    return
+  }
+  await update($, resultadoC, r => {
+    if (r === null || r.juiz === null) return r
+    const achados = r.juiz.achados.map(x => (x.dim === a.dim && x.h === a.h ? { ...x, voto } : x))
+    return { ...semAviso(r), juiz: { ...r.juiz, achados } }
+  })
+}
+
+async function avisar($: EngineInterface, aviso: string | undefined): Promise<void> {
+  await update($, resultadoC, r => (r === null ? r : aviso === undefined ? semAviso(r) : { ...r, aviso }))
+}
+
+// O atom não guarda `undefined`: sem aviso, a chave não existe.
+function semAviso(r: ResultadoC): ResultadoC {
+  const { aviso: _descartado, ...resto } = r
+  return resto
 }
 
 // D-C2: o único comando externo do mod; um `git` que falha, ausente ou ilegível vira "indisponível", nunca zero.

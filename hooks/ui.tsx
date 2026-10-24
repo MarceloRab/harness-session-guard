@@ -1,11 +1,12 @@
 // Emissão (mod-v2 D-T10): um modelo de detalhes puro e as árvores/textos que saem dele.
 import type { EngineInterface } from 'claude-code'
 
-import type { Calculo, Dado, EntradaC, Fatos, Objetivo, Sessao } from '../types'
+import type { Achado, Dado, EntradaC, Fatos, Juiz, Objetivo, ResultadoC, Sessao, Voto } from '../types'
 import { formatarRelogio, intervalosDe, medir, sessaoSeg, type Cor, type Medida } from './atencao'
 import type { ConfigResolvida } from './config'
 import { CHAVES_APAGAR, type Livro } from './livro'
 import { parsearObjetivo, tempoAtivoSeg, type ComandoObjetivo } from './objetivo'
+import { DIMENSOES } from './resultado'
 
 export const TITULO = 'harness-session-guard'
 
@@ -128,14 +129,64 @@ export function textoDetalhes(linhas: readonly Linha[]): string {
 
 // D-C-UI: o único modelo da camada 1; o painel `hsg-avaliacao` e o `/hsg avaliar` desenham estas linhas.
 // Fonte que falhou aparece como "indisponível (motivo)" na linha do fato; as demais linhas continuam.
-export function modeloAvaliacao(c: Calculo | null, entrada: EntradaC | null): Linha[] {
-  if (c === null) return [{ texto: 'Nenhuma avaliação ainda: clique em C ou use /hsg avaliar.', fraco: false }]
+// D-J10: depois da camada 1 e da entrada vêm o resultado do juiz (se for o desta entrada), o C6, o custo e os avisos.
+export function modeloAvaliacao(r: ResultadoC | null, entrada: EntradaC | null): Linha[] {
+  if (r === null) return [{ texto: 'Nenhuma avaliação ainda: clique em C ou use /hsg avaliar.', fraco: false }]
   const linhas: Linha[] = []
   const l = (texto: string, fraco = false) => linhas.push({ texto, fraco })
-  if (c.tipo === 'nada') l('Nada a calcular: sem objetivo e sem sessão de atenção aberta.')
-  else camada1(c.fatos, l)
+  if (r.calculo.tipo === 'nada') l('Nada a calcular: sem objetivo e sem sessão de atenção aberta.')
+  else camada1(r.calculo.fatos, l)
   if (entrada !== null) l(linhaEntrada(entrada))
+  if (r.andamento) l('Avaliação em andamento…')
+  if (r.aviso !== undefined) l(`Aviso: ${r.aviso}`)
+  const j = juizVisivel(r, entrada)
+  if (j !== null) linhasJuiz(j, l)
+  l(
+    r.contexto.ok
+      ? `Contexto da sessão: ${r.contexto.valor.tokens ?? 'sem medida'} tokens de ${r.contexto.valor.window}${r.contexto.valor.percent === null ? '' : ` (${r.contexto.valor.percent}%)`}`
+      : `Contexto da sessão: indisponível (${r.contexto.motivo})`,
+    true,
+  )
+  l('O resultado do juiz não entra no custo da sessão nem no /usage.', true)
+  l('O juiz não vê CLAUDE.md nem skills: um DoD que remete a eles não é verificável.', true)
+  l('O modelo julga a conversa e o resultado não é determinístico.', true)
   return linhas
+}
+
+// O resultado do juiz só vale para a entrada atual (mesmo hash); de outra entrada ele não é mostrado.
+function juizVisivel(r: ResultadoC, entrada: EntradaC | null): Juiz | null {
+  return r.juiz !== null && entrada !== null && entrada.ok && entrada.hash === r.juiz.hash ? r.juiz : null
+}
+
+// Os achados com botões na tela: os descartados (citação não encontrada) ficam só como linha de texto.
+export function achadosDaTela(r: ResultadoC | null, entrada: EntradaC | null): Achado[] {
+  const j = r === null ? null : juizVisivel(r, entrada)
+  return j === null ? [] : j.achados.filter(a => a.estado !== 'descartado')
+}
+
+function linhasJuiz(j: Juiz, l: (texto: string, fraco?: boolean) => number): void {
+  if (j.reutilizado === true) l('Resultado guardado, sem custo: a entrada não mudou desde a última avaliação.')
+  if (j.resultado !== 'ok') l(`Juiz: ${j.resultado}${j.motivo === undefined ? '' : ` · ${j.motivo}`}`)
+  else {
+    for (const dim of DIMENSOES) {
+      const a = j.achados.find(x => x.dim === dim)
+      if (a === undefined) l(`${dim}: nada a apontar`)
+      else if (a.estado === 'descartado') l(`${dim}: descartado: citação não encontrada`)
+      else {
+        l(`${dim}: nível ${a.nivel}${a.estado === 'ja-apontado' ? ' · já apontado' : ''} · "${a.citacao}"`)
+        if (a.nivel === 2 && a.sugestao !== undefined) l(`  sugestão: ${a.sugestao}`, true)
+        if (a.voto !== undefined) l(`  voto: ${a.voto}`, true)
+      }
+    }
+  }
+  const u = j.usage
+  l(
+    u === null
+      ? 'Custo da última avaliação: indisponível (a chamada foi recusada antes de enviar)'
+      : `Custo da última avaliação: input ${u.input_tokens} · cache_read ${u.cache_read_input_tokens} · cache_creation ${u.cache_creation_input_tokens} · output ${u.output_tokens}`,
+    true,
+  )
+  if (j.gravacao !== undefined) l(`Não gravado em avaliacoes: ${j.gravacao}`)
 }
 
 // D-J11: o estado da entrada do juiz; `hash` completo quando montada.
@@ -233,6 +284,44 @@ export function painel(el: El, linhas: readonly Linha[]) {
     <Box flexDirection="column">
       {linhas.map(x => (
         <Text dimColor={x.fraco}>{x.texto}</Text>
+      ))}
+    </Box>
+  )
+}
+
+export type AcoesAchado = {
+  sugerir: (a: Achado) => Promise<void> // U1: escreve a sugestão no prompt, sem enviar
+  votar: (a: Achado, voto: Voto) => Promise<void> // U2
+}
+
+const VOTOS: readonly { voto: Voto; rotulo: string }[] = [
+  { voto: 'util', rotulo: 'útil' },
+  { voto: 'nao-se-aplica', rotulo: 'não se aplica' },
+  { voto: 'errado', rotulo: 'errado' },
+]
+
+// O painel `hsg-avaliacao`: as linhas do modelo e, por achado, U1 (só no nível 2, com sugestão) e U2.
+export function painelAvaliacao(el: El, linhas: readonly Linha[], achados: readonly Achado[], acoes: AcoesAchado) {
+  const { Box, Text, Button } = el
+  return (
+    <Box flexDirection="column">
+      {linhas.map(x => (
+        <Text dimColor={x.fraco}>{x.texto}</Text>
+      ))}
+      {achados.map(a => (
+        <Box flexDirection="row" gap={1}>
+          <Text>{a.dim}</Text>
+          {a.nivel === 2 && a.sugestao !== undefined && (
+            <Button key={`hsg-u1-${a.dim}`} onPress={() => acoes.sugerir(a)}>
+              <Text>[usar sugestão]</Text>
+            </Button>
+          )}
+          {VOTOS.map(v => (
+            <Button key={`hsg-u2-${a.dim}-${v.voto}`} onPress={() => acoes.votar(a, v.voto)}>
+              <Text>[{v.rotulo}]</Text>
+            </Button>
+          ))}
+        </Box>
       ))}
     </Box>
   )

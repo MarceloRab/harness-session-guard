@@ -3,7 +3,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { ErroDados } from '../types'
+import type { Dimensao, ErroDados, Usage, Voto } from '../types'
 import type { Registro } from './atencao'
 import type { CampoConfig } from './config'
 import type { EventoObjetivo } from './objetivo'
@@ -13,13 +13,6 @@ export type Livro = { formato: 2; sessoes: Registro[] }
 export type Objetivos = { formato: 1; eventos: EventoObjetivo[] }
 
 // D-J13: só números, ids curtos (`h`), hashes e votos; nenhum texto (S5).
-export type Dimensao = 'dod' | 'suposicao' | 'tangente' | 'semLastro'
-export type Usage = {
-  input_tokens: number
-  output_tokens: number
-  cache_read_input_tokens: number
-  cache_creation_input_tokens: number
-}
 export type Avaliacoes = {
   formato: 1
   achados: { dim: Dimensao; h: string; t: number }[]
@@ -32,7 +25,7 @@ export type Avaliacoes = {
     citacoesDescartadas: number
     status?: number | null
   }[]
-  feedback: { dim: Dimensao; h: string; voto: 'util' | 'nao-se-aplica' | 'errado'; t: number }[]
+  feedback: { dim: Dimensao; h: string; voto: Voto; t: number }[]
 }
 export type Codigo =
   | 'versao'
@@ -159,7 +152,7 @@ export async function lerObjetivos($: EngineInterface): Promise<Objetivos | null
   return ler($, OBJETIVOS)
 }
 
-// D-J13: só leitura nesta versão do mod (a escrita é do juiz). Fora do desenho a rejeição vira o erro corrente.
+// D-J13: fora do desenho a rejeição vira o erro corrente.
 export async function lerAvaliacoes($: EngineInterface): Promise<Avaliacoes | null> {
   return ler($, AVALIACOES)
 }
@@ -167,6 +160,46 @@ export async function lerAvaliacoes($: EngineInterface): Promise<Avaliacoes | nu
 // Para o `ui.render`: leitura sem relatar.
 export async function espiarAvaliacoes($: EngineInterface): Promise<Leitura<Avaliacoes>> {
   return lerSemRelatar($, AVALIACOES)
+}
+
+// D-J13 (escrita): só números, hashes, `usage` e votos. Cada gravação devolve `true` só se gravou; recusa
+// (`avaliacoes-cheio`, `store-recusou`, `dados-incompativeis:avaliacoes`) fica no erro corrente.
+// D-P6: com `HSG_DEBUG=1`, só o tipo da gravação vai ao log.
+export type CliqueAvaliacao = Avaliacoes['cliques'][number]
+export type ObjetivoAvaliado = Avaliacoes['objetivos'][number]
+export type AchadoGravado = Avaliacoes['achados'][number]
+export type FeedbackGravado = Avaliacoes['feedback'][number]
+
+export async function gravarClique(
+  $: EngineInterface,
+  clique: CliqueAvaliacao,
+  objetivo: ObjetivoAvaliado | null,
+  agora: number,
+): Promise<boolean> {
+  return gravarAvaliacoes($, 'clique', agora, v => ({
+    ...v,
+    cliques: [...v.cliques, clique],
+    objetivos: objetivo === null ? v.objetivos : [...v.objetivos, objetivo],
+  }))
+}
+
+export async function gravarAchados($: EngineInterface, achados: readonly AchadoGravado[], agora: number): Promise<boolean> {
+  return gravarAvaliacoes($, 'achado', agora, v => ({ ...v, achados: [...v.achados, ...achados] }))
+}
+
+export async function gravarFeedback($: EngineInterface, feedback: FeedbackGravado, agora: number): Promise<boolean> {
+  return gravarAvaliacoes($, 'feedback', agora, v => ({ ...v, feedback: [...v.feedback, feedback] }))
+}
+
+async function gravarAvaliacoes(
+  $: EngineInterface,
+  tipo: 'clique' | 'achado' | 'feedback',
+  agora: number,
+  mudar: (v: Avaliacoes) => Avaliacoes,
+): Promise<boolean> {
+  const gravou = await gravar($, AVALIACOES, agora, mudar)
+  if (gravou && debug) $.ui.log(`harness-session-guard avaliacoes ${tipo}`)
+  return gravou
 }
 
 // D-O3: acrescenta os eventos de uma transição num único `gravar`. Devolve `true` só se gravou.

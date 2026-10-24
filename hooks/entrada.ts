@@ -29,7 +29,8 @@ export type DadosEntrada = {
   avaliacoes: Avaliacoes | null // null = incompatível (já relatado pelo chamador)
 }
 
-export type EntradaMontada = { blocos: Bloco[]; hash: string }
+// `evidencia`: os itens de texto enviados (prompts digitados e texto do agente, normalizados), para a C1.
+export type EntradaMontada = { blocos: Bloco[]; hash: string; evidencia: string[] }
 
 // D-J6: objeto JSON com chaves ordenadas (recursivamente) e strings em NFC, com espaços colapsados e trim.
 export function canonico(valor: unknown): string {
@@ -126,7 +127,8 @@ export async function montarEntrada(d: DadosEntrada): Promise<Dado<EntradaMontad
     { text: canonico({ jaApontados: jaApontados(d.avaliacoes, o), avalieAPartirDoTurno: turnoInicial(turnos, d.avaliacoes, o) }) },
   ]
   const hash = await hashEntrada(blocos)
-  return { ok: true, valor: { blocos, hash } }
+  const evidencia = corte.valor.turnos.flatMap(t => [t.prompt, ...t.agente]).map(normalizar)
+  return { ok: true, valor: { blocos, hash, evidencia } }
 }
 
 // D-J8.
@@ -136,7 +138,7 @@ export async function hashEntrada(blocos: readonly Bloco[]): Promise<string> {
 }
 
 // Y3: ids `{dim, h}` dos achados com `t ≥ abertoEm` do objetivo, em ordem fixa.
-function jaApontados(a: Avaliacoes, o: Objetivo): { dim: string; h: string }[] {
+export function jaApontados(a: Avaliacoes, o: Objetivo): { dim: string; h: string }[] {
   return a.achados
     .filter(x => x.t >= o.abertoEm)
     .map(x => ({ dim: x.dim, h: x.h }))
