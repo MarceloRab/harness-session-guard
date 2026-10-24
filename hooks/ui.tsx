@@ -174,7 +174,6 @@ function linhasJuiz(j: Juiz, l: (texto: string, fraco?: boolean) => number): voi
       else if (a.estado === 'descartado') l(`${dim}: descartado: citação não encontrada`)
       else {
         l(`${dim}: nível ${a.nivel}${a.estado === 'ja-apontado' ? ' · já apontado' : ''} · "${a.citacao}"`)
-        if (a.nivel === 2 && a.sugestao !== undefined) l(`  sugestão: ${a.sugestao}`, true)
         if (a.voto !== undefined) l(`  voto: ${a.voto}`, true)
       }
     }
@@ -290,7 +289,6 @@ export function painel(el: El, linhas: readonly Linha[]) {
 }
 
 export type AcoesAchado = {
-  sugerir: (a: Achado) => Promise<void> // U1: escreve a sugestão no prompt, sem enviar
   votar: (a: Achado, voto: Voto) => Promise<void> // U2
 }
 
@@ -300,7 +298,7 @@ const VOTOS: readonly { voto: Voto; rotulo: string }[] = [
   { voto: 'errado', rotulo: 'errado' },
 ]
 
-// O painel `hsg-avaliacao`: as linhas do modelo e, por achado, U1 (só no nível 2, com sugestão) e U2.
+// O painel `hsg-avaliacao`: as linhas do modelo e, por achado, U2.
 export function painelAvaliacao(el: El, linhas: readonly Linha[], achados: readonly Achado[], acoes: AcoesAchado) {
   const { Box, Text, Button } = el
   return (
@@ -311,11 +309,6 @@ export function painelAvaliacao(el: El, linhas: readonly Linha[], achados: reado
       {achados.map(a => (
         <Box flexDirection="row" gap={1}>
           <Text>{a.dim}</Text>
-          {a.nivel === 2 && a.sugestao !== undefined && (
-            <Button key={`hsg-u1-${a.dim}`} onPress={() => acoes.sugerir(a)}>
-              <Text>[usar sugestão]</Text>
-            </Button>
-          )}
           {VOTOS.map(v => (
             <Button key={`hsg-u2-${a.dim}-${v.voto}`} onPress={() => acoes.votar(a, v.voto)}>
               <Text>[{v.rotulo}]</Text>

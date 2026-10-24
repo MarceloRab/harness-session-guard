@@ -185,7 +185,6 @@ export const register: Register = (on, options) => {
     const r = await read($, resultadoC)
     const entrada = await read($, entradaC)
     return painelAvaliacao($.ui.resolve(e), modeloAvaliacao(r, entrada), achadosDaTela(r, entrada), {
-      sugerir: a => sugerir($, a),
       votar: (a, voto) => votar($, a, voto),
     })
   })
@@ -458,13 +457,6 @@ async function contextoC6($: EngineInterface): Promise<ResultadoC['contexto']> {
   if (!r.ok) return r
   const c = r.valor.context
   return { ok: true, valor: { tokens: c.tokens ?? null, window: c.window, percent: c.percent ?? null } }
-}
-
-// D-J10 (U1): escreve a sugestão no campo do prompt e nunca envia.
-async function sugerir($: EngineInterface, a: Achado): Promise<void> {
-  if (a.sugestao === undefined) return
-  const r = await $.prompt.fill({ text: a.sugestao, mode: 'replace' })
-  await avisar($, r.isFilled ? undefined : `o prompt não foi preenchido (${r.refusal ?? 'recusado'})`)
 }
 
 // D-J10 (U2): grava o voto do dev; só marca o achado na tela se gravou.

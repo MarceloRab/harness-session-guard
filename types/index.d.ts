@@ -77,7 +77,6 @@ export type Achado = {
   h: string
   nivel: 1 | 2
   citacao: string
-  sugestao?: string
   estado: 'novo' | 'ja-apontado' | 'descartado'
   voto?: Voto
 }

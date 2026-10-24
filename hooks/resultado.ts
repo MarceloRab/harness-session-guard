@@ -5,8 +5,8 @@ import { sha256Hex } from './hash'
 
 export const DIMENSOES: readonly Dimensao[] = ['dod', 'suposicao', 'tangente', 'semLastro']
 
-// O que o juiz respondeu, já validado: `citacao` e `sugestao` só quando presentes.
-export type Veredito = { nivel: 0 | 1 | 2; citacao?: string; sugestao?: string }
+// O que o juiz respondeu, já validado: `citacao` só quando presente.
+export type Veredito = { nivel: 0 | 1 | 2; citacao?: string }
 export type Resposta = Record<Dimensao, Veredito>
 
 // D-J9: Y3 usa os 12 primeiros hex do SHA-256 da citação normalizada.
@@ -15,7 +15,7 @@ export async function hashCurto(citacao: string): Promise<string> {
 }
 
 // D-J9: depois de `trim`, um objeto JSON com exatamente as chaves das 4 dimensões, cada uma `{ nivel: 0|1|2,
-// citacao?: string, sugestao?: string }`, com `citacao` não vazia quando `nivel > 0`. Qualquer outra forma
+// citacao?: string }`, com `citacao` não vazia quando `nivel > 0`. Qualquer outra forma
 // (inclusive cerca de código e texto fora do JSON) é inválida, com o motivo.
 export function parsearResposta(texto: string): Dado<Resposta> {
   let bruto: unknown
@@ -41,17 +41,12 @@ export function parsearResposta(texto: string): Dado<Resposta> {
 
 function veredito(x: unknown): Veredito | string {
   if (!objetoSimples(x)) return 'deve ser um objeto'
-  if (!Object.keys(x).every(k => k === 'nivel' || k === 'citacao' || k === 'sugestao')) return 'chave desconhecida'
-  const { nivel, citacao, sugestao } = x
+  if (!Object.keys(x).every(k => k === 'nivel' || k === 'citacao')) return 'chave desconhecida'
+  const { nivel, citacao } = x
   if (nivel !== 0 && nivel !== 1 && nivel !== 2) return 'nivel deve ser 0, 1 ou 2'
   if (citacao !== undefined && typeof citacao !== 'string') return 'citacao deve ser texto'
-  if (sugestao !== undefined && typeof sugestao !== 'string') return 'sugestao deve ser texto'
   if (nivel > 0 && (citacao === undefined || normalizar(citacao) === '')) return 'nivel acima de 0 exige citacao não vazia'
-  return {
-    nivel,
-    ...(citacao === undefined ? {} : { citacao }),
-    ...(sugestao === undefined ? {} : { sugestao }),
-  }
+  return { nivel, ...(citacao === undefined ? {} : { citacao }) }
 }
 
 function objetoSimples(x: unknown): x is Record<string, unknown> {
@@ -59,7 +54,7 @@ function objetoSimples(x: unknown): x is Record<string, unknown> {
 }
 
 // D-J9 (C1): a citação, normalizada, precisa ser substring de um item de texto da evidência enviada; senão o
-// achado é descartado e contado. Só as dimensões com nível acima de 0 viram achado; a sugestão só vale no nível 2.
+// achado é descartado e contado. Só as dimensões com nível acima de 0 viram achado.
 export async function conferirCitacoes(
   r: Resposta,
   evidencia: readonly string[],
@@ -71,13 +66,7 @@ export async function conferirCitacoes(
     if (v.nivel === 0) continue
     const citacao = normalizar(v.citacao as string)
     if (!evidencia.some(item => item.includes(citacao))) descartados.add(dim)
-    achados.push({
-      dim,
-      h: await hashCurto(citacao),
-      nivel: v.nivel,
-      citacao,
-      ...(v.nivel === 2 && v.sugestao !== undefined ? { sugestao: v.sugestao } : {}),
-    })
+    achados.push({ dim, h: await hashCurto(citacao), nivel: v.nivel, citacao })
   }
   return { achados, descartados }
 }

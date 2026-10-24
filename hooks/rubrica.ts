@@ -1,8 +1,8 @@
-// Rubrica v1 do juiz (mod-v2 D-J2, D-J12). Texto puro, sem `$`.
-// ESTADO: aprovada pelo operador (D-011 em `Decisions` do handoff, 2026-10-24).
+// Rubrica v2 do juiz (mod-v2 D-J2, D-J12; mod-v2-feed D-F9). Texto puro, sem `$`.
+// ESTADO: aprovada pelo operador (D-001 em `Decisions` do handoff do mod-v2-feed, 2026-10-24).
 // Qualquer mudança no texto exige nova `VERSAO_RUBRICA` e nova aprovação (F4).
 
-export const VERSAO_RUBRICA = 'v1'
+export const VERSAO_RUBRICA = 'v2'
 
 export const RUBRICA_V1 = `Rubrica ${VERSAO_RUBRICA}.
 
@@ -40,9 +40,8 @@ Avalie quatro dimensões. Cada uma recebe um nível: 0 (nada a apontar), 1 (ind�
 Regras gerais:
 - Avalie a partir do turno indicado em "avalieAPartirDoTurno"; os turnos anteriores são contexto. Não repita um achado listado em "jaApontados" (identificado por dimensão e h).
 - Uma citação é um trecho copiado literalmente de um item de texto da evidência (prompt do dev ou texto do agente). Nunca parafraseie. Sem citação literal, o nível é 0.
-- "sugestao" só existe no nível 2 e nasce de um achado com citação: uma frase curta que o dev poderia dizer ao agente.
 - Não use nenhuma informação fora da entrada.
 
 Formato da resposta: um único objeto JSON, sem cerca de código e sem nenhum texto fora do JSON, com exatamente as chaves dod, suposicao, tangente e semLastro:
-{"dod":{"nivel":0},"suposicao":{"nivel":1,"citacao":"..."},"tangente":{"nivel":2,"citacao":"...","sugestao":"..."},"semLastro":{"nivel":0}}
-Cada chave tem "nivel" (0, 1 ou 2); "citacao" quando o nível é maior que 0; "sugestao" apenas quando o nível é 2.`
+{"dod":{"nivel":0},"suposicao":{"nivel":1,"citacao":"..."},"tangente":{"nivel":2,"citacao":"..."},"semLastro":{"nivel":0}}
+Cada chave tem "nivel" (0, 1 ou 2) e "citacao" quando o nível é maior que 0.`
