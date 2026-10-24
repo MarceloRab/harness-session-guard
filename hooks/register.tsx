@@ -365,8 +365,14 @@ async function avaliar($: EngineInterface): Promise<void> {
     await update($, resultadoC, () => ({ ...base, juiz: { ...anterior, reutilizado: true as const } }))
     return
   }
-  const juiz = await julgar($, { entrada, objetivo: o, fatos: calculo.fatos, avaliacoes }, { ...base, juiz: anterior })
-  await update($, resultadoC, () => ({ ...base, juiz }))
+  // `julgar` marca `andamento: true` no atom; se lançar (invariante quebrado), o `finally` o desmarca, mantém o
+  // juiz anterior e a exceção segue para quem chamou.
+  let juiz = anterior
+  try {
+    juiz = await julgar($, { entrada, objetivo: o, fatos: calculo.fatos, avaliacoes }, { ...base, juiz: anterior })
+  } finally {
+    await update($, resultadoC, () => ({ ...base, juiz }))
+  }
 }
 
 type PedidoJuiz = {
