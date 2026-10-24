@@ -1,4 +1,4 @@
-// Persistência v2 no `$.store` (mod-v2 D-P1…D-P3). Único arquivo que toca `$.store`.
+// Persistência v2 no `$.store` (mod-v2 D-P1…D-P3, D-J13). Único arquivo que toca `$.store`.
 // Regras puras (validação, poda, upsert, migração) primeiro; I/O depois.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
@@ -8,15 +8,39 @@ import type { Registro } from './atencao'
 import type { CampoConfig } from './config'
 import type { EventoObjetivo } from './objetivo'
 
-export type Chave = 'livro' | 'objetivos'
+export type Chave = 'livro' | 'objetivos' | 'avaliacoes'
 export type Livro = { formato: 2; sessoes: Registro[] }
 export type Objetivos = { formato: 1; eventos: EventoObjetivo[] }
+
+// D-J13: só números, ids curtos (`h`), hashes e votos; nenhum texto (S5).
+export type Dimensao = 'dod' | 'suposicao' | 'tangente' | 'semLastro'
+export type Usage = {
+  input_tokens: number
+  output_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+}
+export type Avaliacoes = {
+  formato: 1
+  achados: { dim: Dimensao; h: string; t: number }[]
+  objetivos: { t: number; objetivoId: string; tAtivoSeg: number; ciclos: number; commits: number; semAvancoSeg: number }[]
+  cliques: {
+    t: number
+    hash: string
+    usage: Usage
+    resultado: 'ok' | 'json-invalido' | 'api-error' | 'empty-reply' | 'aborted'
+    citacoesDescartadas: number
+    status?: number | null
+  }[]
+  feedback: { dim: Dimensao; h: string; voto: 'util' | 'nao-se-aplica' | 'errado'; t: number }[]
+}
 export type Codigo =
   | 'versao'
   | `config:${CampoConfig}`
   | `dados-incompativeis:${Chave}`
   | 'livro-cheio'
   | 'objetivos-cheio'
+  | 'avaliacoes-cheio'
   | 'store-recusou'
 export type Leitura<V> = { ok: true; valor: V } | { ok: false; codigo: Codigo }
 
@@ -63,6 +87,25 @@ const OBJETIVOS: Desc<Objetivos> = {
     return { ...v, eventos: v.eventos.filter(e => (ultimo.get(e.objetivoId) as number) >= agora - TRINTA_DIAS_MS) }
   },
   cheio: 'objetivos-cheio',
+}
+
+// D-J13: achados (Y3), números da camada 1 por clique, cliques do juiz e votos. Poda: cada item sai com mais de 30 dias.
+const AVALIACOES: Desc<Avaliacoes> = {
+  chave: 'avaliacoes',
+  validar: validarAvaliacoes,
+  migrar: null,
+  vazio: () => ({ formato: 1, achados: [], objetivos: [], cliques: [], feedback: [] }),
+  podar: (v, agora) => {
+    const recente = (i: { t: number }) => i.t >= agora - TRINTA_DIAS_MS
+    return {
+      ...v,
+      achados: v.achados.filter(recente),
+      objetivos: v.objetivos.filter(recente),
+      cliques: v.cliques.filter(recente),
+      feedback: v.feedback.filter(recente),
+    }
+  },
+  cheio: 'avaliacoes-cheio',
 }
 
 // Erro corrente num atom: a faixa o lê e redesenha quando ele muda. Zerado em `iniciarLivro`.
@@ -114,6 +157,16 @@ export async function gravarRegistro($: EngineInterface, r: Registro, agora: num
 
 export async function lerObjetivos($: EngineInterface): Promise<Objetivos | null> {
   return ler($, OBJETIVOS)
+}
+
+// D-J13: só leitura nesta versão do mod (a escrita é do juiz). Fora do desenho a rejeição vira o erro corrente.
+export async function lerAvaliacoes($: EngineInterface): Promise<Avaliacoes | null> {
+  return ler($, AVALIACOES)
+}
+
+// Para o `ui.render`: leitura sem relatar.
+export async function espiarAvaliacoes($: EngineInterface): Promise<Leitura<Avaliacoes>> {
+  return lerSemRelatar($, AVALIACOES)
 }
 
 // D-O3: acrescenta os eventos de uma transição num único `gravar`. Devolve `true` só se gravou.
@@ -176,6 +229,83 @@ export function validarObjetivos(x: unknown): x is Objetivos {
     Array.isArray(x.eventos) &&
     x.eventos.every(validarEventoObjetivo)
   )
+}
+
+const DIMENSOES = ['dod', 'suposicao', 'tangente', 'semLastro']
+const RESULTADOS = ['ok', 'json-invalido', 'api-error', 'empty-reply', 'aborted']
+const VOTOS = ['util', 'nao-se-aplica', 'errado']
+
+export function validarAvaliacoes(x: unknown): x is Avaliacoes {
+  return (
+    objetoCom(x, ['formato', 'achados', 'objetivos', 'cliques', 'feedback']) &&
+    x.formato === 1 &&
+    listaDe(x.achados, validarAchado) &&
+    listaDe(x.objetivos, validarObjetivoAvaliado) &&
+    listaDe(x.cliques, validarClique) &&
+    listaDe(x.feedback, validarFeedback)
+  )
+}
+
+function listaDe(x: unknown, valido: (i: unknown) => boolean): boolean {
+  return Array.isArray(x) && x.every(valido)
+}
+
+function validarAchado(x: unknown): boolean {
+  return objetoCom(x, ['dim', 'h', 't']) && DIMENSOES.includes(x.dim as string) && idCurto(x.h) && numero(x.t)
+}
+
+function validarObjetivoAvaliado(x: unknown): boolean {
+  return (
+    objetoCom(x, ['t', 'objetivoId', 'tAtivoSeg', 'ciclos', 'commits', 'semAvancoSeg']) &&
+    numero(x.t) &&
+    typeof x.objetivoId === 'string' &&
+    numero(x.tAtivoSeg) &&
+    numero(x.ciclos) &&
+    numero(x.commits) &&
+    numero(x.semAvancoSeg)
+  )
+}
+
+// `status` é opcional: o do `api-error` (número HTTP, ou null quando a resposta não trouxe um).
+function validarClique(x: unknown): boolean {
+  if (typeof x !== 'object' || x === null || Array.isArray(x)) return false
+  const o = x as Record<string, unknown>
+  const obrigatorias = ['t', 'hash', 'usage', 'resultado', 'citacoesDescartadas']
+  return (
+    Object.keys(o).every(k => obrigatorias.includes(k) || k === 'status') &&
+    obrigatorias.every(k => k in o) &&
+    numero(o.t) &&
+    typeof o.hash === 'string' &&
+    validarUsage(o.usage) &&
+    RESULTADOS.includes(o.resultado as string) &&
+    numero(o.citacoesDescartadas) &&
+    (!('status' in o) || o.status === null || numero(o.status))
+  )
+}
+
+function validarUsage(x: unknown): boolean {
+  return (
+    objetoCom(x, ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']) &&
+    numero(x.input_tokens) &&
+    numero(x.output_tokens) &&
+    numero(x.cache_read_input_tokens) &&
+    numero(x.cache_creation_input_tokens)
+  )
+}
+
+function validarFeedback(x: unknown): boolean {
+  return (
+    objetoCom(x, ['dim', 'h', 'voto', 't']) &&
+    DIMENSOES.includes(x.dim as string) &&
+    idCurto(x.h) &&
+    VOTOS.includes(x.voto as string) &&
+    numero(x.t)
+  )
+}
+
+// Y3: `h` é um hash curto (12 hex).
+function idCurto(x: unknown): boolean {
+  return typeof x === 'string' && /^[0-9a-f]{12}$/.test(x)
 }
 
 function validarEventoObjetivo(x: unknown): x is EventoObjetivo {

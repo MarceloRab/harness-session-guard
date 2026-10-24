@@ -1,19 +1,21 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Calculo, Commit, Dado, Objetivo, Sessao } from '../types'
+import type { Calculo, Commit, Dado, EntradaC, Objetivo, Sessao } from '../types'
 import { aplicarID, expirou, intervalosDe, iniciarTurno, medir, registroEm, renovar } from './atencao'
 import { resolverConfig, versaoAtende, type ConfigResolvida } from './config'
 import {
   acrescentarPrompt,
   argvGitLog,
   calcularFatos,
+  casarPrompts,
   janelaDe,
   parsearGitLog,
   registrarPrompt,
   type Janela,
-  type Mensagem,
+  type MensagensCasadas,
 } from './fatos'
+import { montarEntrada, MOTIVO_SEM_OBJETIVO } from './entrada'
 import {
   apagarDados,
   CHAVES_APAGAR,
@@ -23,6 +25,7 @@ import {
   gravarEventosObjetivo,
   gravarRegistro,
   iniciarLivro,
+  lerAvaliacoes,
   lerLivro,
   lerObjetivos,
   registrarErro,
@@ -39,6 +42,7 @@ import {
   painel,
   TEXTO_APAGAR,
   textoDetalhes,
+  textoEntrada,
   textoObjetivo,
   TITULO,
   USO,
@@ -63,6 +67,8 @@ const objetivo = atom({ plugin: 'harness-session-guard', key: 'objetivo' } as co
 const prompts = atom({ plugin: 'harness-session-guard', key: 'prompts' } as const, [], { shape: 'prompts-1' })
 const compactacoes = atom({ plugin: 'harness-session-guard', key: 'compactacoes' } as const, [], { shape: 'compactacoes-1' })
 const resultadoC = atom({ plugin: 'harness-session-guard', key: 'resultadoC' } as const, null, { shape: 'resultadoC-1' })
+// D-P4/D-J11: a última entrada do juiz (ou o motivo de não montar); só `$.state`.
+const entradaC = atom({ plugin: 'harness-session-guard', key: 'entradaC' } as const, null, { shape: 'entradaC-1' })
 
 // Estado do módulo: recomeça a cada reload e é refeito em session.start.
 // `config` null = o mod não mede (versão ou configuração com erro, em `erro`; código curto em `erroCodigo`).
@@ -98,7 +104,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: COMANDO,
       description: 'harness-session-guard: detalhes da sessão de atenção, objetivo e dados',
-      argumentHint: '[objetivo [abrir|trocar|dod|fechar] ... | avaliar | apagar-dados [confirmar]]',
+      argumentHint: '[objetivo [abrir|trocar|dod|fechar] ... | avaliar | entrada | apagar-dados [confirmar]]',
     })
     await retomar($)
     armarTick($)
@@ -164,7 +170,7 @@ export const register: Register = (on, options) => {
 
   // D-C-UI: o painel só lê o atom; não executa git nem lê mensagens.
   on('ui.render', { component: 'Pane', requestId: PANE_AVALIACAO }, async ($, e) => {
-    return painel($.ui.resolve(e), modeloAvaliacao(await read($, resultadoC)))
+    return painel($.ui.resolve(e), modeloAvaliacao(await read($, resultadoC), await read($, entradaC)))
   })
 
   // `/hsg` e argumentos; cada execução conta como ID.
@@ -206,7 +212,14 @@ async function executar($: EngineInterface, a: Acao): Promise<string> {
         texto = textoDetalhes(modeloDetalhes(await entradaDetalhes($, false)))
         break
       case 'avaliar':
-        texto = config === null ? `Indisponível: ${erro} · /hsg` : textoDetalhes(modeloAvaliacao(await avaliar($)))
+        if (config === null) texto = `Indisponível: ${erro} · /hsg`
+        else {
+          const { calculo, entrada } = await avaliar($)
+          texto = textoDetalhes(modeloAvaliacao(calculo, entrada))
+        }
+        break
+      case 'entrada':
+        texto = textoEntrada(await read($, entradaC))
         break
       case 'apagar-dados':
         texto = TEXTO_APAGAR
@@ -284,26 +297,41 @@ async function guardarCompactacao($: EngineInterface): Promise<void> {
 
 // D-C-UI: lê as fontes (livro, objetivo, sessão, mensagens, git), calcula a camada 1 e guarda o resultado no atom.
 // Chamada só pelo clique na C e por `/hsg avaliar`. Nada vai ao armazenamento persistente.
-async function avaliar($: EngineInterface): Promise<Calculo> {
+// D-J11: monta também a entrada do juiz (sem chamar o modelo) e a guarda no atom `entradaC`.
+async function avaliar($: EngineInterface): Promise<{ calculo: Calculo; entrada: EntradaC }> {
   const o = await read($, objetivo)
   const viva = await read($, atencao)
   const janela = janelaDe(o, null, viva)
+  const t = await $.clock.now()
   let calculo: Calculo = { tipo: 'nada' }
+  let entrada: EntradaC = { t, ok: false, motivo: MOTIVO_SEM_OBJETIVO }
   if (janela !== null) {
     const livro = await lerLivro($)
-    calculo = await calcularFatos({
+    const bruto = await tentar($.session.messages())
+    const mensagens: Dado<MensagensCasadas> = bruto.ok
+      ? { ok: true, valor: { lista: bruto.valor, casamento: await casarPrompts(bruto.valor, await read($, prompts)) } }
+      : bruto
+    calculo = calcularFatos({
       objetivo: o,
       fechamento: null,
       viva,
       registros: livro === null ? null : livro.sessoes,
       commits: await commitsDaJanela($, janela),
-      mensagens: await tentar<readonly Mensagem[]>($.session.messages()),
+      mensagens,
       prompts: await read($, prompts),
       compactacoes: await read($, compactacoes),
     })
+    const montada = await montarEntrada({
+      objetivo: o,
+      fatos: calculo.tipo === 'fatos' ? calculo.fatos : null,
+      mensagens,
+      avaliacoes: await lerAvaliacoes($),
+    })
+    entrada = montada.ok ? { t, ok: true, ...montada.valor } : { t, ok: false, motivo: montada.motivo }
   }
   await update($, resultadoC, () => calculo)
-  return calculo
+  await update($, entradaC, () => entrada)
+  return { calculo, entrada }
 }
 
 // D-C2: o único comando externo do mod; um `git` que falha, ausente ou ilegível vira "indisponível", nunca zero.

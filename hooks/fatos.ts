@@ -17,13 +17,16 @@ export type Casamento = {
   semMensagem: readonly PromptRegistro[] // prompts registrados sem mensagem
 }
 
+// As mensagens da sessão e o casamento delas com os prompts (feito uma vez, por quem chama: o hash é assíncrono).
+export type MensagensCasadas = { lista: readonly Mensagem[]; casamento: Casamento }
+
 export type EntradaFatos = {
   objetivo: Objetivo | null
   fechamento: number | null // D-C1; o atom `objetivo` guarda só o aberto, então o chamador de hoje passa null
   viva: Sessao | null
   registros: readonly Registro[] | null // o livro; null = incompatível
   commits: Dado<Commit[]> // já cortado na janela por `parsearGitLog`
-  mensagens: Dado<readonly Mensagem[]>
+  mensagens: Dado<MensagensCasadas>
   prompts: readonly PromptRegistro[]
   compactacoes: readonly number[]
 }
@@ -87,7 +90,7 @@ export function parsearGitLog(stdout: string, j: Janela): Dado<Commit[]> {
 }
 
 // D-J3: mensagem `user` sem `toolResults` é candidata a prompt digitado.
-function ehDigitada(m: Mensagem): boolean {
+export function ehDigitada(m: Mensagem): boolean {
   return m.role === 'user' && (m.toolResults?.length ?? 0) === 0
 }
 
@@ -147,7 +150,7 @@ export function ciclosDeRefinamento(
 }
 
 // D-C1…D-C7: todos os fatos de uma janela. `{ tipo: 'nada' }` sem objetivo e sem sessão viva.
-export async function calcularFatos(x: EntradaFatos): Promise<Calculo> {
+export function calcularFatos(x: EntradaFatos): Calculo {
   const j = janelaDe(x.objetivo, x.fechamento, x.viva)
   if (j === null) return { tipo: 'nada' }
   const fim = fimDasDuracoes(j, x)
@@ -164,8 +167,8 @@ export async function calcularFatos(x: EntradaFatos): Promise<Calculo> {
   let edicoes: Dado<number>
   let ciclos: Dado<number>
   if (x.mensagens.ok) {
-    const c = await casarPrompts(x.mensagens.valor, x.prompts)
-    const r = ciclosDeRefinamento(x.mensagens.valor, c.casados, j)
+    const { lista, casamento: c } = x.mensagens.valor
+    const r = ciclosDeRefinamento(lista, c.casados, j)
     semMensagem = { ok: true, valor: c.semMensagem.filter(p => dentro(p.t, j)).length }
     mensagensSemRegistro = { ok: true, valor: c.semRegistro.length }
     edicoes = r.ok ? { ok: true, valor: r.valor.edicoes } : r
@@ -235,7 +238,7 @@ function intervalosAteUltimoEvento(x: EntradaFatos): (readonly [number, number])
   return intervalos
 }
 
-function dentro(t: number, j: Janela): boolean {
+export function dentro(t: number, j: Janela): boolean {
   return t >= j.ini && (j.fim === null || t <= j.fim)
 }
 

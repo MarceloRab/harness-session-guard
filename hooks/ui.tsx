@@ -1,7 +1,7 @@
 // Emissão (mod-v2 D-T10): um modelo de detalhes puro e as árvores/textos que saem dele.
 import type { EngineInterface } from 'claude-code'
 
-import type { Calculo, Dado, Fatos, Objetivo, Sessao } from '../types'
+import type { Calculo, Dado, EntradaC, Fatos, Objetivo, Sessao } from '../types'
 import { formatarRelogio, intervalosDe, medir, sessaoSeg, type Cor, type Medida } from './atencao'
 import type { ConfigResolvida } from './config'
 import { CHAVES_APAGAR, type Livro } from './livro'
@@ -9,7 +9,7 @@ import { parsearObjetivo, tempoAtivoSeg, type ComandoObjetivo } from './objetivo
 
 export const TITULO = 'harness-session-guard'
 
-export type Acao = 'detalhes' | 'avaliar' | 'apagar-dados' | 'apagar-confirmar' | 'uso' | { objetivo: ComandoObjetivo }
+export type Acao = 'detalhes' | 'avaliar' | 'entrada' | 'apagar-dados' | 'apagar-confirmar' | 'uso' | { objetivo: ComandoObjetivo }
 
 export type Linha = { texto: string; fraco: boolean }
 
@@ -38,6 +38,7 @@ export const USO = [
   '  /hsg objetivo dod <texto>    define o DoD do objetivo aberto',
   '  /hsg objetivo fechar         fecha o objetivo (conta como avanço)',
   '  /hsg avaliar                 calcula a camada 1 (sem modelo): tempo, commits, ciclos',
+  '  /hsg entrada                 mostra a entrada exata do juiz e o hash do último cálculo',
   '  /hsg apagar-dados            explica o que é apagado',
   '  /hsg apagar-dados confirmar  apaga os dados do harness-session-guard',
 ].join('\n')
@@ -65,6 +66,8 @@ export function interpretar(args: string): Acao {
       return 'detalhes'
     case 'avaliar':
       return 'avaliar'
+    case 'entrada':
+      return 'entrada'
     case 'apagar-dados':
       return 'apagar-dados'
     case 'apagar-dados confirmar':
@@ -125,12 +128,30 @@ export function textoDetalhes(linhas: readonly Linha[]): string {
 
 // D-C-UI: o único modelo da camada 1; o painel `hsg-avaliacao` e o `/hsg avaliar` desenham estas linhas.
 // Fonte que falhou aparece como "indisponível (motivo)" na linha do fato; as demais linhas continuam.
-export function modeloAvaliacao(c: Calculo | null): Linha[] {
+export function modeloAvaliacao(c: Calculo | null, entrada: EntradaC | null): Linha[] {
   if (c === null) return [{ texto: 'Nenhuma avaliação ainda: clique em C ou use /hsg avaliar.', fraco: false }]
-  if (c.tipo === 'nada') return [{ texto: 'Nada a calcular: sem objetivo e sem sessão de atenção aberta.', fraco: false }]
-  const f = c.fatos
   const linhas: Linha[] = []
   const l = (texto: string, fraco = false) => linhas.push({ texto, fraco })
+  if (c.tipo === 'nada') l('Nada a calcular: sem objetivo e sem sessão de atenção aberta.')
+  else camada1(c.fatos, l)
+  if (entrada !== null) l(linhaEntrada(entrada))
+  return linhas
+}
+
+// D-J11: o estado da entrada do juiz; `hash` completo quando montada.
+function linhaEntrada(e: EntradaC): string {
+  return e.ok ? `Entrada do juiz: montada · hash ${e.hash} · /hsg entrada` : `Entrada do juiz: não montada: ${e.motivo}`
+}
+
+// `/hsg entrada`: a entrada exata do último cálculo (blocos na ordem) e o hash, sem chamar o modelo.
+export function textoEntrada(e: EntradaC | null): string {
+  if (e === null) return 'Nenhuma entrada montada: ainda não houve clique na C nem /hsg avaliar.'
+  if (!e.ok) return linhaEntrada(e)
+  const partes = e.blocos.map((b, i) => `--- bloco ${i + 1}${b.cache === true ? ' (cache)' : ''} ---\n${b.text}`)
+  return [`hash ${e.hash}`, ...partes].join('\n')
+}
+
+function camada1(f: Fatos, l: (texto: string, fraco?: boolean) => number): void {
   const dado = <V,>(rotulo: string, d: Dado<V>, mostrar: (v: V) => string) =>
     l(`${rotulo}: ${d.ok ? mostrar(d.valor) : `indisponível (${d.motivo})`}`)
 
@@ -150,7 +171,6 @@ export function modeloAvaliacao(c: Calculo | null): Linha[] {
   l(`Compactações: ${f.compactacoes.length}`)
   if (f.compactacoes.length > 0) l(`Histórico anterior a ${hora(Math.max(...f.compactacoes))} compactado`, true)
   if (f.objetivo === null || !f.objetivo.temDod) l('Tangente e DoD: indisponível: defina objetivo e DoD')
-  return linhas
 }
 
 function linhaEscopo(f: Fatos): string {

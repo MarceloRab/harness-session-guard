@@ -50,6 +50,12 @@ export type Fatos = {
 
 export type Calculo = { tipo: 'nada' } | { tipo: 'fatos'; fatos: Fatos }
 
+// D-J4: um bloco do `prompt` do juiz, no formato de `$.model.complete`.
+export type Bloco = { text: string; cache?: true }
+
+// D-P4/D-J11: a última entrada do juiz (ou o motivo de não montar); só `$.state`. `t` não entra no hash.
+export type EntradaC = { t: number } & ({ ok: true; blocos: Bloco[]; hash: string } | { ok: false; motivo: string })
+
 declare module 'claude-code' {
   interface PluginState {
     'harness-session-guard': {
@@ -66,6 +72,8 @@ declare module 'claude-code' {
       compactacoes: Shaped<number[]>
       // shape 'resultadoC-1' (D-C-UI): último cálculo da camada 1; null = nenhum ainda.
       resultadoC: Shaped<Calculo | null>
+      // shape 'entradaC-1' (D-P4): última entrada do juiz montada pelo clique na C ou por `/hsg avaliar`.
+      entradaC: Shaped<EntradaC | null>
     }
   }
 }
