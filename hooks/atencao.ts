@@ -6,17 +6,18 @@ export type Registro = { id: string; ini: number; fim: number }
 export type Cor = 'neutra' | 'laranja' | 'vermelha'
 export type Medida = { sessaoSeg: number; diaSeg: number; cor: Cor }
 
-// D-T4: uma interação do dev em `t`. Abre sessão nova se não há sessão viva ou se a atenção expirou;
-// `abrirTurno` marca o turno do agente (D-T3), que só um `turn.complete` desmarca.
-export function aplicarID(s: Sessao | null, t: number, sessionId: string, c: ConfigResolvida, abrirTurno: boolean): Sessao {
-  if (s === null || expirou(s, t, c)) {
-    return { id: `${sessionId}:${t}`, ini: t, ultimaID: t, turnoAberto: abrirTurno ? t : null }
-  }
-  return {
-    ...s,
-    ultimaID: Math.max(s.ultimaID, t),
-    turnoAberto: abrirTurno ? (s.turnoAberto ?? t) : s.turnoAberto,
-  }
+// D-T4: uma interação do dev em `t`. Abre sessão nova se não há sessão viva ou se a atenção expirou.
+// Não mexe no turno aberto: quem o marca é `iniciarTurno`.
+export function aplicarID(s: Sessao | null, t: number, sessionId: string, c: ConfigResolvida): Sessao {
+  if (s === null || expirou(s, t, c)) return { id: `${sessionId}:${t}`, ini: t, ultimaID: t, turnoAberto: null }
+  return { ...s, ultimaID: Math.max(s.ultimaID, t) }
+}
+
+// D-T3: `turn.start` do laço principal marca o turno do agente (`desde` = `t`), que só um `turn.complete` desmarca;
+// nunca abre sessão. Uma sessão já expirada (sem turno aberto, passado o prazo) fecha em vez de receber o turno.
+export function iniciarTurno(s: Sessao | null, t: number, c: ConfigResolvida): Sessao | null {
+  if (s === null || expirou(s, t, c)) return null
+  return { ...s, turnoAberto: s.turnoAberto ?? t }
 }
 
 // D-T3: `turn.complete` do laço principal desmarca o turno e renova `ultimaID`; nunca abre sessão.
@@ -31,13 +32,9 @@ export function expirou(s: Sessao, t: number, c: ConfigResolvida): boolean {
   return s.turnoAberto === null && t - s.ultimaID >= c.fimAtencaoSeg * 1000
 }
 
-// D-T4: ao fechar, `fim = ultimaID`.
-export function registroFechado(s: Sessao): Registro {
-  return { id: s.id, ini: s.ini, fim: s.ultimaID }
-}
-
-// D-T7: o registro vivo vai até `agora` com turno aberto, senão até `ultimaID`.
-export function registroVivo(s: Sessao, agora: number): Registro {
+// D-T4/D-T7: `fim = turnoAberto ? agora : ultimaID`, no tick e ao fechar. Só o `session.end` fecha com turno
+// aberto; o fechamento por timer ou pela ID seguinte só ocorre sem turno aberto, então ali `fim = ultimaID`.
+export function registroEm(s: Sessao, agora: number): Registro {
   return { id: s.id, ini: s.ini, fim: s.turnoAberto !== null ? agora : s.ultimaID }
 }
 

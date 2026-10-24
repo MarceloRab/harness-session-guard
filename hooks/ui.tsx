@@ -41,9 +41,13 @@ export const USO = [
   '  /hsg apagar-dados confirmar  apaga os dados do harness-session-guard',
 ].join('\n')
 
+// D-O6: o atom `objetivo` é derivado dos dados apagados e também é zerado.
+export const AVISO_OBJETIVO = 'encerra o objetivo aberto; reabra com /hsg objetivo abrir'
+
 export const TEXTO_APAGAR = [
   'apagar-dados remove do armazenamento do harness-session-guard as chaves:',
   `  ${CHAVES_APAGAR.join(', ')}.`,
+  `Também ${AVISO_OBJETIVO}.`,
   'A sessão de atenção aberta continua sendo medida.',
   'Para apagar: /hsg apagar-dados confirmar',
 ].join('\n')

@@ -7,7 +7,7 @@ export type EventoObjetivo = {
   tipo: 'abrir' | 'trocar' | 'fechar' | 'timebox'
   objetivoId: string
   timeboxMin?: number
-  motivo?: 'reinicio'
+  motivo?: 'reinicio' // só leitura de legado (D-O3): o T não escreve mais este motivo
 }
 
 export type ComandoObjetivo =
@@ -71,14 +71,6 @@ export function aplicarTransicao(atual: Objetivo | null, c: Mutacao, t: number, 
         mensagem: 'Objetivo fechado.',
       }
   }
-}
-
-// D-O4: ids com `abrir` e sem `fechar`/`trocar` no store, quando o atom está vazio (processo reiniciado ou --resume).
-// Com o atom preenchido (hot reload) o objetivo ainda existe neste processo e nada é fechado.
-export function abertoSemTexto(eventos: readonly EventoObjetivo[], ativo: Objetivo | null): string[] {
-  if (ativo !== null) return []
-  const encerrados = new Set(eventos.filter(e => e.tipo === 'fechar' || e.tipo === 'trocar').map(e => e.objetivoId))
-  return eventos.filter(e => e.tipo === 'abrir' && !encerrados.has(e.objetivoId)).map(e => e.objetivoId)
 }
 
 // D-T7c: o evento `timebox` é único por objetivo.

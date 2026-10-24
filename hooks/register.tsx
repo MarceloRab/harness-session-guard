@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Objetivo, Sessao } from '../types'
-import { aplicarID, expirou, intervalosDe, medir, registroFechado, registroVivo, renovar } from './atencao'
+import { aplicarID, expirou, intervalosDe, iniciarTurno, medir, registroEm, renovar } from './atencao'
 import { resolverConfig, versaoAtende, type ConfigResolvida } from './config'
 import {
   apagarDados,
@@ -19,8 +19,9 @@ import {
   verificarDados,
   type Livro,
 } from './livro'
-import { abertoSemTexto, aplicarTransicao, temTimebox, tempoAtivoSeg, type Mutacao } from './objetivo'
+import { aplicarTransicao, temTimebox, tempoAtivoSeg, type Mutacao } from './objetivo'
 import {
+  AVISO_OBJETIVO,
   faixa,
   interpretar,
   modeloDetalhes,
@@ -84,17 +85,20 @@ export const register: Register = (on, options) => {
       argumentHint: '[objetivo [abrir|trocar|dod|fechar] ... | apagar-dados [confirmar]]',
     })
     await retomar($)
-    await fecharObjetivosSemTexto($)
     armarTick($)
 
     return next(e)
   })
 
-  // D-T2/D-T3: a interação do dev que abre o turno do agente. Um `/hsg` conta pelo `command.run` e não abre turno.
+  // D-T2: a interação do dev conta como ID; quem abre o turno do agente é o `turn.start`.
   on('prompt.submit', async ($, e, next) => {
-    if (ORIGENS_SUBMIT.includes(e.origin.kind) && e.isMeta !== true && e.command?.name !== COMANDO) {
-      await registrarID($, true)
-    }
+    if (ORIGENS_SUBMIT.includes(e.origin.kind) && e.isMeta !== true) await registrarID($)
+    return next(e)
+  })
+
+  // D-T3: o início de um turno do laço principal (sem `agentId`) o marca como aberto; sem sessão viva não faz nada.
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) await inicioDeTurno($)
     return next(e)
   })
 
@@ -134,12 +138,12 @@ export const register: Register = (on, options) => {
   on('command.run', { command: COMANDO }, async ($, e) => ({ text: await executar($, interpretar(e.args)) }))
 }
 
-// D-T2/D-T3: uma interação do dev; `abrirTurno` marca o turno do agente.
-export async function registrarID($: EngineInterface, abrirTurno = false): Promise<void> {
+// D-T2: uma interação do dev.
+export async function registrarID($: EngineInterface): Promise<void> {
   if (config === null) return
   const t = await $.clock.now()
   const sessionId = await $.session.id()
-  await aplicar($, t, (s, c) => aplicarID(s, t, sessionId, c, abrirTurno))
+  await aplicar($, t, (s, c) => aplicarID(s, t, sessionId, c))
 }
 
 // Clique da bolinha: abre o painel e conta como ID.
@@ -165,8 +169,9 @@ async function executar($: EngineInterface, a: Acao): Promise<string> {
         break
       case 'apagar-confirmar':
         await apagarDados($)
+        await update($, objetivo, () => null) // D-O6: o objetivo aberto dependia dos dados apagados
         mostrarErroDeConfig($)
-        texto = `Dados apagados: ${CHAVES_APAGAR.join(', ')}.`
+        texto = `Dados apagados: ${CHAVES_APAGAR.join(', ')}; ${AVISO_OBJETIVO}.`
         break
     }
   }
@@ -193,21 +198,6 @@ async function falhaDeDados($: EngineInterface): Promise<string> {
   if (e === null) throw new Error('harness-session-guard: o objetivo não gravou e não há erro corrente')
   const acao = e.codigo.startsWith('dados-incompativeis:') ? '/hsg apagar-dados confirmar' : '/hsg'
   return `Não foi possível gravar o objetivo: ${e.codigo} · ${acao}`
-}
-
-// D-O4: com o atom vazio (processo reiniciado ou --resume), cada objetivo aberto no store vira `trocar`/`reinicio`.
-async function fecharObjetivosSemTexto($: EngineInterface): Promise<void> {
-  if (config === null) return
-  const objetivos = await lerObjetivos($)
-  if (objetivos === null) return
-  const abertos = abertoSemTexto(objetivos.eventos, await read($, objetivo))
-  if (abertos.length === 0) return
-  const t = await $.clock.now()
-  await gravarEventosObjetivo(
-    $,
-    abertos.map(objetivoId => ({ t, tipo: 'trocar' as const, objetivoId, motivo: 'reinicio' as const })),
-    t,
-  )
 }
 
 // `noDesenho`: dentro do `ui.render` lê sem relatar (gravar no `$.state` ali é recusado) e mostra a
@@ -239,18 +229,22 @@ function mostrarErroDeConfig($: EngineInterface): void {
   $.ui.status(erro === null ? undefined : `harness-session-guard: ${erro} · /hsg`)
 }
 
+async function inicioDeTurno($: EngineInterface): Promise<void> {
+  if (config === null) return
+  const t = await $.clock.now()
+  await aplicar($, t, (s, c) => iniciarTurno(s, t, c))
+}
+
 async function fimDeTurno($: EngineInterface): Promise<void> {
   if (config === null) return
   const t = await $.clock.now()
   await aplicar($, t, (s, c) => renovar(s, t, c))
 }
 
+// D-T3/D-T4: fecha a sessão e zera o turno aberto; `aplicar` grava o registro com `fim = turnoAberto ? t : ultimaID`.
 async function encerrar($: EngineInterface): Promise<void> {
   if (config === null) return
-  const t = await $.clock.now()
-  // D-008: o session.end com turno aberto conta como o fim do turno; renova `ultimaID` para o registro fechar em `t`.
-  await aplicar($, t, (s, c) => (s !== null && s.turnoAberto !== null ? renovar(s, t, c) : s))
-  await aplicar($, t, () => null)
+  await aplicar($, await $.clock.now(), () => null)
 }
 
 // Depois de um reload: fecha a sessão viva se a atenção já expirou; senão rearma o timer.
@@ -268,7 +262,7 @@ async function fecharSeExpirou($: EngineInterface): Promise<void> {
   await aplicar($, t, (s, c) => (s !== null && expirou(s, t, c) ? null : s))
 }
 
-// Ponto único de mudança da sessão viva; a sessão que fecha (ou é trocada) é gravada aqui com `fim = ultimaID`.
+// Ponto único de mudança da sessão viva; a sessão que fecha (ou é trocada) é gravada aqui (D-T4, `registroEm`).
 async function aplicar(
   $: EngineInterface,
   t: number,
@@ -285,7 +279,7 @@ async function aplicar(
   armarFechamento($, atual, t, c)
   const fechada = antes
   if (fechada !== null && (atual === null || atual.id !== fechada.id)) {
-    await gravarRegistro($, registroFechado(fechada), t)
+    await gravarRegistro($, registroEm(fechada, t), t)
   }
   return atual
 }
@@ -315,7 +309,7 @@ async function aoTick($: EngineInterface): Promise<void> {
   const t = await $.clock.now()
   await update($, pulso, () => t)
   const s = await read($, atencao)
-  if (s !== null) await gravarRegistro($, registroVivo(s, t), t)
+  if (s !== null) await gravarRegistro($, registroEm(s, t), t)
   const o = await read($, objetivo)
   if (o !== null) await verificarTimebox($, o, t)
 }
