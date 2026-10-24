@@ -128,6 +128,8 @@ declare module 'claude-code' {
       resultadoC: Shaped<ResultadoC | null>
       // shape 'entradaC-1' (D-P4): última entrada do juiz montada pelo clique na C ou por `/hsg avaliar`.
       entradaC: Shaped<EntradaC | null>
+      // shape 'avisoFaixa-1' (mod-v2-feed D-F1): o aviso do último clique na T/C, ao lado das bolinhas; null = nenhum.
+      avisoFaixa: Shaped<string | null>
     }
   }
 }

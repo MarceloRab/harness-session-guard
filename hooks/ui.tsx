@@ -9,8 +9,6 @@ import { parsearObjetivo, tempoAtivoSeg, type ComandoObjetivo } from './objetivo
 import { DIMENSOES } from './resultado'
 import { ruim, sugestoes } from './sugestoes'
 
-export const TITULO = 'harness-session-guard'
-
 export type Acao = 'detalhes' | 'avaliar' | 'entrada' | 'apagar-dados' | 'apagar-confirmar' | 'uso' | { objetivo: ComandoObjetivo }
 
 export type Linha = { texto: string; fraco: boolean }
@@ -39,8 +37,8 @@ export const USO = [
   '  /hsg objetivo trocar [timebox=<min>] <texto>  fecha o atual como troca e abre outro',
   '  /hsg objetivo dod <texto>    define o DoD do objetivo aberto',
   '  /hsg objetivo fechar         fecha o objetivo (conta como avanço)',
-  '  /hsg avaliar                 calcula a camada 1 (sem modelo): tempo, commits, ciclos',
-  '  /hsg entrada                 mostra a entrada exata do juiz e o hash do último cálculo',
+  '  /hsg avaliar                 avalia (camada 1 e juiz) e mostra no feed',
+  '  /hsg entrada                 mostra no feed a entrada exata do juiz',
   '  /hsg apagar-dados            explica o que é apagado',
   '  /hsg apagar-dados confirmar  apaga os dados do harness-session-guard',
 ].join('\n')
@@ -79,7 +77,7 @@ export function interpretar(args: string): Acao {
   }
 }
 
-// D-T10: o único modelo dos detalhes; o painel e o `/hsg` desenham estas linhas.
+// D-T10: o único modelo dos detalhes; o `/hsg` desenha estas linhas.
 export function modeloDetalhes(x: EntradaDetalhes): Linha[] {
   const linhas: Linha[] = []
   const l = (texto: string, fraco = false) => linhas.push({ texto, fraco })
@@ -128,7 +126,7 @@ export function textoDetalhes(linhas: readonly Linha[]): string {
   return linhas.map(x => x.texto).join('\n')
 }
 
-// D-C-UI: o único modelo da camada 1; o painel `hsg-avaliacao` e o `/hsg avaliar` desenham estas linhas.
+// D-C-UI: o único modelo da camada 1; a linha do `/hsg avaliar` no feed desenha estas linhas.
 // Fonte que falhou aparece como "indisponível (motivo)" na linha do fato; as demais linhas continuam.
 // D-J10: depois da camada 1 e da entrada vêm o resultado do juiz (se for o desta entrada), o C6, o custo e os avisos.
 export function modeloAvaliacao(r: ResultadoC | null, entrada: EntradaC | null): Linha[] {
@@ -237,7 +235,7 @@ export function hora(t: number): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-// Painel e `/hsg`: sem o texto do objetivo, só o id curto e o tempo ativo (pelo menos: o livro é o piso).
+// `/hsg`: sem o texto do objetivo, só o id curto e o tempo ativo (pelo menos: o livro é o piso).
 function linhaObjetivo(o: Objetivo, livro: Livro | null, viva: Sessao | null, agora: number): string {
   const ativo =
     livro === null
@@ -250,12 +248,18 @@ function linhaObjetivo(o: Objetivo, livro: Livro | null, viva: Sessao | null, ag
 // ---------- Árvores ----------
 
 // A bolinha `●` + `T` + relógio como Button `hsg-t`, na cor de D-T1; ao lado, a C (`hsg-c`), sempre neutra.
-// Em erro a faixa mostra só o erro: sem medição não há o que avaliar.
-export function faixa(el: El, f: Faixa, abrir: () => Promise<void>, avaliar: () => Promise<void>) {
+// Em erro a faixa mostra só o erro: sem medição não há o que avaliar. D-F11: `aviso` (atom `avisoFaixa`) esmaecido no fim.
+export function faixa(
+  el: El,
+  f: Faixa,
+  aviso: string | null,
+  pedirT: () => Promise<void>,
+  pedirC: () => Promise<void>,
+) {
   const { Box, Text, Button } = el
   return (
     <Box flexDirection="row" gap={1}>
-      <Button key="hsg-t" onPress={abrir}>
+      <Button key="hsg-t" onPress={pedirT}>
         {f.tipo === 'erro' ? (
           <Text color="error">T! {f.erro} · /hsg</Text>
         ) : f.medida.cor === 'neutra' ? (
@@ -269,28 +273,18 @@ export function faixa(el: El, f: Faixa, abrir: () => Promise<void>, avaliar: () 
         )}
       </Button>
       {f.tipo === 'medida' && (
-        <Button key="hsg-c" onPress={avaliar}>
+        <Button key="hsg-c" onPress={pedirC}>
           <Text dimColor>● C</Text>
         </Button>
       )}
+      {aviso !== null && <Text dimColor>{aviso}</Text>}
     </Box>
   )
 }
 
-// O painel `hsg-detalhes` com as linhas do modelo.
-export function painel(el: El, linhas: readonly Linha[]) {
-  const { Box, Text } = el
-  return (
-    <Box flexDirection="column">
-      {linhas.map(x => (
-        <Text dimColor={x.fraco}>{x.texto}</Text>
-      ))}
-    </Box>
-  )
-}
-
-export type AcoesAchado = {
+export type AcoesLinha = {
   votar: (a: Achado, voto: Voto) => Promise<void> // U2
+  sugerir: (texto: string) => Promise<void> // D-F8: acrescenta o template à caixa, sem enviar
 }
 
 const VOTOS: readonly { voto: Voto; rotulo: string }[] = [
@@ -298,32 +292,6 @@ const VOTOS: readonly { voto: Voto; rotulo: string }[] = [
   { voto: 'nao-se-aplica', rotulo: 'não se aplica' },
   { voto: 'errado', rotulo: 'errado' },
 ]
-
-// O painel `hsg-avaliacao`: as linhas do modelo e, por achado, U2.
-export function painelAvaliacao(el: El, linhas: readonly Linha[], achados: readonly Achado[], acoes: AcoesAchado) {
-  const { Box, Text, Button } = el
-  return (
-    <Box flexDirection="column">
-      {linhas.map(x => (
-        <Text dimColor={x.fraco}>{x.texto}</Text>
-      ))}
-      {achados.map(a => (
-        <Box flexDirection="row" gap={1}>
-          <Text>{a.dim}</Text>
-          {VOTOS.map(v => (
-            <Button key={`hsg-u2-${a.dim}-${v.voto}`} onPress={() => acoes.votar(a, v.voto)}>
-              <Text>[{v.rotulo}]</Text>
-            </Button>
-          ))}
-        </Box>
-      ))}
-    </Box>
-  )
-}
-
-export type AcoesLinha = AcoesAchado & {
-  sugerir: (texto: string) => Promise<void> // D-F8: acrescenta o template à caixa, sem enviar
-}
 
 // D-F4/D-F5/D-F6: a árvore da linha do `/hsg avaliar` no feed: as linhas do modelo, os votos por achado e, quando a
 // avaliação é ruim, os botões de sugestão (o terminal desenha `[ rótulo ]`).

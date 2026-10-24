@@ -430,7 +430,7 @@ export async function gravar<V>($: EngineInterface, d: Desc<V>, agora: number, m
 }
 
 // O erro mais recente fica no atom e no status; a mensagem da recusa nunca vai para o store.
-// O mesmo erro, enquanto é o corrente, é registrado uma vez (a faixa e o painel releem o store a cada desenho).
+// O mesmo erro, enquanto é o corrente, é registrado uma vez (a faixa relê o store a cada desenho).
 async function falhar($: EngineInterface, codigo: Codigo, detalhe: string | null): Promise<void> {
   const corrente = await read($, erroAtom)
   if (corrente !== null && corrente.codigo === codigo && corrente.detalhe === detalhe) return

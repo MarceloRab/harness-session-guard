@@ -51,13 +51,10 @@ import {
   linhaRica,
   modeloAvaliacao,
   modeloDetalhes,
-  painel,
-  painelAvaliacao,
   TEXTO_APAGAR,
   textoDetalhes,
   textoEntrada,
   textoObjetivo,
-  TITULO,
   USO,
   type Acao,
   type EntradaDetalhes,
@@ -65,14 +62,12 @@ import {
 
 const VERSAO_MINIMA = [2, 1, 310] as const
 const ORIGENS_SUBMIT = ['composer', 'bridge']
-const PANE = 'hsg-detalhes'
-const PANE_AVALIACAO = 'hsg-avaliacao'
 const COMANDO = 'hsg'
 const TICK_MS = 60_000
 
 // Sessão de atenção viva; o shape recusa o que uma versão anterior do código guardou.
 const atencao = atom({ plugin: 'harness-session-guard', key: 'atencao' } as const, null, { shape: 'atencao-2' })
-// D-T7: instante do último tick; a faixa e o painel o leem para redesenhar o relógio.
+// D-T7: instante do último tick; a faixa o lê para redesenhar o relógio.
 const pulso = atom({ plugin: 'harness-session-guard', key: 'pulso' } as const, 0, { shape: 'pulso-1' })
 // D-O1: o objetivo aberto, com texto e DoD; só aqui e nunca no armazenamento persistente.
 const objetivo = atom({ plugin: 'harness-session-guard', key: 'objetivo' } as const, null, { shape: 'objetivo-1' })
@@ -82,6 +77,8 @@ const compactacoes = atom({ plugin: 'harness-session-guard', key: 'compactacoes'
 const resultadoC = atom({ plugin: 'harness-session-guard', key: 'resultadoC' } as const, null, { shape: 'resultadoC-3' })
 // D-P4/D-J11: a última entrada do juiz (ou o motivo de não montar); só `$.state`.
 const entradaC = atom({ plugin: 'harness-session-guard', key: 'entradaC' } as const, null, { shape: 'entradaC-1' })
+// D-F1: o aviso do último clique na T/C (caixa com texto ou indisponível); só `$.state`.
+const avisoFaixa = atom({ plugin: 'harness-session-guard', key: 'avisoFaixa' } as const, null, { shape: 'avisoFaixa-1' })
 
 // Estado do módulo: recomeça a cada reload e é refeito em session.start.
 // `config` null = o mod não mede (versão ou configuração com erro, em `erro`; código curto em `erroCodigo`).
@@ -116,6 +113,11 @@ export const register: Register = (on, options) => {
       config = resultado.config
     }
     mostrarErroDeConfig($)
+    // D-F12: uma tela lateral do mod-v2 aberta antes do reload sobrevive ao módulo; é fechada aqui.
+    for (const id of ['hsg-detalhes', 'hsg-avaliacao']) {
+      const r = await tentar($.ui.close({ id }))
+      if (!r.ok) $.ui.log(`harness-session-guard: painel antigo ${id} não fechou: ${r.motivo}`)
+    }
     await $.command.register({
       name: COMANDO,
       description: 'harness-session-guard: detalhes da sessão de atenção, objetivo e dados',
@@ -169,27 +171,14 @@ export const register: Register = (on, options) => {
     await read($, pulso) // só assina: o tick de 1 min redesenha o relógio
     const livro = await espiarLivro($)
     const erroFaixa = erroCodigo ?? (await erroCorrente($))?.codigo ?? (livro.ok ? null : livro.codigo)
-    const abrir = () => abrirDetalhes($)
-    const avaliar = () => abrirAvaliacao($)
-    if (erroFaixa !== null) return faixa($.ui.resolve(e), { tipo: 'erro', erro: erroFaixa }, abrir, avaliar)
+    const aviso = await read($, avisoFaixa) // também assina: um aviso novo redesenha a faixa
+    const pedirT = () => pedir($, '/hsg')
+    const pedirC = () => pedir($, '/hsg avaliar')
+    if (erroFaixa !== null) return faixa($.ui.resolve(e), { tipo: 'erro', erro: erroFaixa }, aviso, pedirT, pedirC)
     // Sem erro e sem configuração só antes de session.start: a faixa passa a vez.
     if (!livro.ok || config === null) return next(e)
     const medida = medir(await read($, atencao), livro.valor.sessoes, await $.clock.now(), config)
-    return faixa($.ui.resolve(e), { tipo: 'medida', medida }, abrir, avaliar)
-  })
-
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    await read($, pulso) // só assina: o tick de 1 min redesenha o painel
-    return painel($.ui.resolve(e), modeloDetalhes(await entradaDetalhes($, true)))
-  })
-
-  // D-C-UI: o painel só lê o atom; não executa git nem lê mensagens.
-  on('ui.render', { component: 'Pane', requestId: PANE_AVALIACAO }, async ($, e) => {
-    const r = await read($, resultadoC)
-    const entrada = await read($, entradaC)
-    return painelAvaliacao($.ui.resolve(e), modeloAvaliacao(r, entrada), achadosDaTela(r, entrada), {
-      votar: (a, voto) => votar($, a, voto),
-    })
+    return faixa($.ui.resolve(e), { tipo: 'medida', medida }, aviso, pedirT, pedirC)
   })
 
   // D-F4: a linha do `/hsg avaliar` e do `/hsg entrada` no feed; o id do texto guardado escolhe a árvore. Só lê os atoms.
@@ -221,23 +210,28 @@ export async function registrarID($: EngineInterface): Promise<void> {
   await aplicar($, t, (s, c) => aplicarID(s, t, sessionId, c))
 }
 
-// Clique da bolinha: abre o painel e conta como ID.
-async function abrirDetalhes($: EngineInterface): Promise<void> {
-  await $.ui.open({ id: PANE, title: TITULO })
+// D-F1: o clique na T/C escreve o comando na caixa vazia (o dev aperta Enter); com rascunho ou caixa indisponível,
+// só o aviso na faixa. Sempre conta como ID.
+async function pedir($: EngineInterface, comando: '/hsg' | '/hsg avaliar'): Promise<void> {
+  const aviso = await escreverNaCaixa($, comando)
+  await update($, avisoFaixa, () => aviso)
   await registrarID($)
 }
 
-// Clique da C: abre o painel (que mostra "em andamento"), avalia e conta como ID. Com uma avaliação em curso,
-// `avaliar` não chama de novo e o painel segue mostrando o andamento.
-async function abrirAvaliacao($: EngineInterface): Promise<void> {
-  if (config === null) return
-  await $.ui.open({ id: PANE_AVALIACAO, title: TITULO })
-  await avaliar($)
-  await registrarID($)
+// O aviso do pedido, ou null se o comando foi escrito na caixa.
+async function escreverNaCaixa($: EngineInterface, comando: string): Promise<string | null> {
+  const caixa = await tentar($.prompt.read())
+  if (!caixa.ok) return `caixa indisponível: ${caixa.motivo}`
+  if (caixa.valor.text.trim() !== '') return `caixa com texto: envie ou apague e clique de novo (ou digite ${comando})`
+  const r = await tentar($.prompt.fill({ text: comando, mode: 'append' }))
+  if (!r.ok) return `caixa indisponível: ${r.motivo}`
+  return r.valor.isFilled ? null : `caixa indisponível (${r.valor.refusal ?? 'recusado por um hook'})`
 }
 
 // Fluxo: ação em livro.ts → registro de ID. Devolve o texto do `/hsg`.
+// D-F2: toda execução zera o aviso da faixa.
 async function executar($: EngineInterface, a: Acao): Promise<string> {
+  await update($, avisoFaixa, () => null)
   let texto: string
   if (typeof a === 'object') texto = await executarObjetivo($, a.objetivo)
   else {
