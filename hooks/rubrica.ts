@@ -1,6 +1,6 @@
 // Rubrica v1 do juiz (mod-v2 D-J2, D-J12). Texto puro, sem `$`.
-// ESTADO: pendente de aprovação do operador. Só vale depois de uma linha de aprovação em `Decisions` do handoff;
-// qualquer mudança no texto exige nova `VERSAO_RUBRICA` (F4).
+// ESTADO: aprovada pelo operador (D-011 em `Decisions` do handoff, 2026-10-24).
+// Qualquer mudança no texto exige nova `VERSAO_RUBRICA` e nova aprovação (F4).
 
 export const VERSAO_RUBRICA = 'v1'
 
