@@ -1,7 +1,7 @@
 // Emissão (mod-v2 D-T10): um modelo de detalhes puro e as árvores/textos que saem dele.
 import type { EngineInterface } from 'claude-code'
 
-import type { Objetivo, Sessao } from '../types'
+import type { Calculo, Dado, Fatos, Objetivo, Sessao } from '../types'
 import { formatarRelogio, intervalosDe, medir, sessaoSeg, type Cor, type Medida } from './atencao'
 import type { ConfigResolvida } from './config'
 import { CHAVES_APAGAR, type Livro } from './livro'
@@ -9,7 +9,7 @@ import { parsearObjetivo, tempoAtivoSeg, type ComandoObjetivo } from './objetivo
 
 export const TITULO = 'harness-session-guard'
 
-export type Acao = 'detalhes' | 'apagar-dados' | 'apagar-confirmar' | 'uso' | { objetivo: ComandoObjetivo }
+export type Acao = 'detalhes' | 'avaliar' | 'apagar-dados' | 'apagar-confirmar' | 'uso' | { objetivo: ComandoObjetivo }
 
 export type Linha = { texto: string; fraco: boolean }
 
@@ -37,6 +37,7 @@ export const USO = [
   '  /hsg objetivo trocar [timebox=<min>] <texto>  fecha o atual como troca e abre outro',
   '  /hsg objetivo dod <texto>    define o DoD do objetivo aberto',
   '  /hsg objetivo fechar         fecha o objetivo (conta como avanço)',
+  '  /hsg avaliar                 calcula a camada 1 (sem modelo): tempo, commits, ciclos',
   '  /hsg apagar-dados            explica o que é apagado',
   '  /hsg apagar-dados confirmar  apaga os dados do harness-session-guard',
 ].join('\n')
@@ -62,6 +63,8 @@ export function interpretar(args: string): Acao {
   switch (args.trim().split(/\s+/).join(' ')) {
     case '':
       return 'detalhes'
+    case 'avaliar':
+      return 'avaliar'
     case 'apagar-dados':
       return 'apagar-dados'
     case 'apagar-dados confirmar':
@@ -87,11 +90,13 @@ export function modeloDetalhes(x: EntradaDetalhes): Linha[] {
     l(`Sessão de atenção: pelo menos ${formatarRelogio(sessaoSeg(x.sessao, x.agora))}`)
     if (x.sessao.turnoAberto !== null) l(`Turno aberto desde ${hora(x.sessao.turnoAberto)}`)
   }
+  const medida = x.livro === null ? null : medir(x.sessao, x.livro.sessoes, x.agora, c)
   l(
-    x.livro === null
+    medida === null
       ? 'Total do dia: indisponível (dados incompatíveis · /hsg apagar-dados confirmar)'
-      : `Total do dia: pelo menos ${formatarRelogio(medir(x.sessao, x.livro.sessoes, x.agora, c).diaSeg)}`,
+      : `Total do dia: pelo menos ${formatarRelogio(medida.diaSeg)}`,
   )
+  if (medida !== null && medida.cor !== 'neutra') l('Veja a qualidade no tempo em C.')
   if (x.objetivo !== null) l(linhaObjetivo(x.objetivo, x.livro, x.sessao, x.agora))
   l(
     `Ao fechar, a sessão termina na última interação: o relógio pode recuar até ${c.fimAtencaoSeg / 60} min.`,
@@ -118,6 +123,44 @@ export function textoDetalhes(linhas: readonly Linha[]): string {
   return linhas.map(x => x.texto).join('\n')
 }
 
+// D-C-UI: o único modelo da camada 1; o painel `hsg-avaliacao` e o `/hsg avaliar` desenham estas linhas.
+// Fonte que falhou aparece como "indisponível (motivo)" na linha do fato; as demais linhas continuam.
+export function modeloAvaliacao(c: Calculo | null): Linha[] {
+  if (c === null) return [{ texto: 'Nenhuma avaliação ainda: clique em C ou use /hsg avaliar.', fraco: false }]
+  if (c.tipo === 'nada') return [{ texto: 'Nada a calcular: sem objetivo e sem sessão de atenção aberta.', fraco: false }]
+  const f = c.fatos
+  const linhas: Linha[] = []
+  const l = (texto: string, fraco = false) => linhas.push({ texto, fraco })
+  const dado = <V,>(rotulo: string, d: Dado<V>, mostrar: (v: V) => string) =>
+    l(`${rotulo}: ${d.ok ? mostrar(d.valor) : `indisponível (${d.motivo})`}`)
+
+  l(linhaEscopo(f))
+  dado('Tempo ativo', f.tempoAtivoSeg, v => `pelo menos ${formatarRelogio(v)}`)
+  dado('Commits', f.commits, v => String(v.length))
+  if (f.commits.ok) for (const commit of f.commits.valor) l(`  ${commit.assunto}`, true)
+  dado('Tempo desde o último avanço', f.desdeAvancoSeg, v => formatarRelogio(v))
+  if (f.timebox !== null) dado('Timebox', f.timebox, v => `${v.min} min · ${v.atingido ? 'atingido' : 'não atingido'}`)
+  l(`Turnos do dev: ${f.turnos}`)
+  dado('Edições', f.edicoes, v => `pelo menos ${v}`)
+  dado('Ciclos de refinamento', f.ciclos, v => `pelo menos ${v}`)
+  if (f.semMensagem.ok && f.semMensagem.valor > 0) l(`${f.semMensagem.valor} prompts sem mensagem correspondente`, true)
+  if (f.mensagensSemRegistro.ok && f.mensagensSemRegistro.valor > 0) {
+    l(`${f.mensagensSemRegistro.valor} mensagens do dev sem registro (omitidas)`, true)
+  }
+  l(`Compactações: ${f.compactacoes.length}`)
+  if (f.compactacoes.length > 0) l(`Histórico anterior a ${hora(Math.max(...f.compactacoes))} compactado`, true)
+  if (f.objetivo === null || !f.objetivo.temDod) l('Tangente e DoD: indisponível: defina objetivo e DoD')
+  return linhas
+}
+
+function linhaEscopo(f: Fatos): string {
+  if (f.objetivo === null) return `Objetivo não declarado: calculado pela sessão de atenção desde ${hora(f.ini)}`
+  const aberto = `aberto às ${hora(f.objetivo.abertoEm)}`
+  return f.objetivo.fechamento === null
+    ? `Objetivo ${aberto}`
+    : `Objetivo fechado às ${hora(f.objetivo.fechamento)} (${aberto})`
+}
+
 export function hora(t: number): string {
   const d = new Date(t)
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
@@ -135,11 +178,12 @@ function linhaObjetivo(o: Objetivo, livro: Livro | null, viva: Sessao | null, ag
 
 // ---------- Árvores ----------
 
-// A bolinha `●` + `T` + relógio como Button `hsg-t`, na cor de D-T1.
-export function faixa(el: El, f: Faixa, abrir: () => Promise<void>) {
+// A bolinha `●` + `T` + relógio como Button `hsg-t`, na cor de D-T1; ao lado, a C (`hsg-c`), sempre neutra.
+// Em erro a faixa mostra só o erro: sem medição não há o que avaliar.
+export function faixa(el: El, f: Faixa, abrir: () => Promise<void>, avaliar: () => Promise<void>) {
   const { Box, Text, Button } = el
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="row" gap={1}>
       <Button key="hsg-t" onPress={abrir}>
         {f.tipo === 'erro' ? (
           <Text color="error">T! {f.erro} · /hsg</Text>
@@ -153,6 +197,11 @@ export function faixa(el: El, f: Faixa, abrir: () => Promise<void>) {
           </Text>
         )}
       </Button>
+      {f.tipo === 'medida' && (
+        <Button key="hsg-c" onPress={avaliar}>
+          <Text dimColor>● C</Text>
+        </Button>
+      )}
     </Box>
   )
 }

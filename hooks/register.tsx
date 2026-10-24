@@ -1,9 +1,19 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Objetivo, Sessao } from '../types'
+import type { Calculo, Commit, Dado, Objetivo, Sessao } from '../types'
 import { aplicarID, expirou, intervalosDe, iniciarTurno, medir, registroEm, renovar } from './atencao'
 import { resolverConfig, versaoAtende, type ConfigResolvida } from './config'
+import {
+  acrescentarPrompt,
+  argvGitLog,
+  calcularFatos,
+  janelaDe,
+  parsearGitLog,
+  registrarPrompt,
+  type Janela,
+  type Mensagem,
+} from './fatos'
 import {
   apagarDados,
   CHAVES_APAGAR,
@@ -24,6 +34,7 @@ import {
   AVISO_OBJETIVO,
   faixa,
   interpretar,
+  modeloAvaliacao,
   modeloDetalhes,
   painel,
   TEXTO_APAGAR,
@@ -38,6 +49,7 @@ import {
 const VERSAO_MINIMA = [2, 1, 310] as const
 const ORIGENS_SUBMIT = ['composer', 'bridge']
 const PANE = 'hsg-detalhes'
+const PANE_AVALIACAO = 'hsg-avaliacao'
 const COMANDO = 'hsg'
 const TICK_MS = 60_000
 
@@ -47,6 +59,10 @@ const atencao = atom({ plugin: 'harness-session-guard', key: 'atencao' } as cons
 const pulso = atom({ plugin: 'harness-session-guard', key: 'pulso' } as const, 0, { shape: 'pulso-1' })
 // D-O1: o objetivo aberto, com texto e DoD; só aqui e nunca no armazenamento persistente.
 const objetivo = atom({ plugin: 'harness-session-guard', key: 'objetivo' } as const, null, { shape: 'objetivo-1' })
+// D-J3/D-C6/D-C-UI: só `$.state`. `prompts` guarda `len` e `hash` dos prompts digitados (nunca o texto).
+const prompts = atom({ plugin: 'harness-session-guard', key: 'prompts' } as const, [], { shape: 'prompts-1' })
+const compactacoes = atom({ plugin: 'harness-session-guard', key: 'compactacoes' } as const, [], { shape: 'compactacoes-1' })
+const resultadoC = atom({ plugin: 'harness-session-guard', key: 'resultadoC' } as const, null, { shape: 'resultadoC-1' })
 
 // Estado do módulo: recomeça a cada reload e é refeito em session.start.
 // `config` null = o mod não mede (versão ou configuração com erro, em `erro`; código curto em `erroCodigo`).
@@ -82,7 +98,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: COMANDO,
       description: 'harness-session-guard: detalhes da sessão de atenção, objetivo e dados',
-      argumentHint: '[objetivo [abrir|trocar|dod|fechar] ... | apagar-dados [confirmar]]',
+      argumentHint: '[objetivo [abrir|trocar|dod|fechar] ... | avaliar | apagar-dados [confirmar]]',
     })
     await retomar($)
     armarTick($)
@@ -91,9 +107,20 @@ export const register: Register = (on, options) => {
   })
 
   // D-T2: a interação do dev conta como ID; quem abre o turno do agente é o `turn.start`.
+  // D-J3: o prompt digitado (sem `command`) também deixa `len` e `hash` no atom `prompts`.
   on('prompt.submit', async ($, e, next) => {
-    if (ORIGENS_SUBMIT.includes(e.origin.kind) && e.isMeta !== true) await registrarID($)
+    if (ORIGENS_SUBMIT.includes(e.origin.kind) && e.isMeta !== true) {
+      await registrarID($)
+      if (e.command === undefined) await guardarPrompt($, e.text)
+    }
     return next(e)
+  })
+
+  // D-C6: o horário de cada compactação do laço principal que aconteceu (manual, automática ou de plugin).
+  on('session.compact', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId === undefined && e.trigger !== 'precompute' && r.skip === undefined) await guardarCompactacao($)
+    return r
   })
 
   // D-T3: o início de um turno do laço principal (sem `agentId`) o marca como aberto; sem sessão viva não faz nada.
@@ -122,16 +149,22 @@ export const register: Register = (on, options) => {
     const livro = await espiarLivro($)
     const erroFaixa = erroCodigo ?? (await erroCorrente($))?.codigo ?? (livro.ok ? null : livro.codigo)
     const abrir = () => abrirDetalhes($)
-    if (erroFaixa !== null) return faixa($.ui.resolve(e), { tipo: 'erro', erro: erroFaixa }, abrir)
+    const avaliar = () => abrirAvaliacao($)
+    if (erroFaixa !== null) return faixa($.ui.resolve(e), { tipo: 'erro', erro: erroFaixa }, abrir, avaliar)
     // Sem erro e sem configuração só antes de session.start: a faixa passa a vez.
     if (!livro.ok || config === null) return next(e)
     const medida = medir(await read($, atencao), livro.valor.sessoes, await $.clock.now(), config)
-    return faixa($.ui.resolve(e), { tipo: 'medida', medida }, abrir)
+    return faixa($.ui.resolve(e), { tipo: 'medida', medida }, abrir, avaliar)
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     await read($, pulso) // só assina: o tick de 1 min redesenha o painel
     return painel($.ui.resolve(e), modeloDetalhes(await entradaDetalhes($, true)))
+  })
+
+  // D-C-UI: o painel só lê o atom; não executa git nem lê mensagens.
+  on('ui.render', { component: 'Pane', requestId: PANE_AVALIACAO }, async ($, e) => {
+    return painel($.ui.resolve(e), modeloAvaliacao(await read($, resultadoC)))
   })
 
   // `/hsg` e argumentos; cada execução conta como ID.
@@ -152,6 +185,14 @@ async function abrirDetalhes($: EngineInterface): Promise<void> {
   await registrarID($)
 }
 
+// Clique da C: calcula a camada 1, abre o painel e conta como ID.
+async function abrirAvaliacao($: EngineInterface): Promise<void> {
+  if (config === null) return
+  await avaliar($)
+  await $.ui.open({ id: PANE_AVALIACAO, title: TITULO })
+  await registrarID($)
+}
+
 // Fluxo: ação em livro.ts → registro de ID. Devolve o texto do `/hsg`.
 async function executar($: EngineInterface, a: Acao): Promise<string> {
   let texto: string
@@ -163,6 +204,9 @@ async function executar($: EngineInterface, a: Acao): Promise<string> {
         break
       case 'detalhes':
         texto = textoDetalhes(modeloDetalhes(await entradaDetalhes($, false)))
+        break
+      case 'avaliar':
+        texto = config === null ? `Indisponível: ${erro} · /hsg` : textoDetalhes(modeloAvaliacao(await avaliar($)))
         break
       case 'apagar-dados':
         texto = TEXTO_APAGAR
@@ -222,6 +266,61 @@ async function entradaDetalhes($: EngineInterface, noDesenho: boolean): Promise<
     config,
     agora: await $.clock.now(),
   }
+}
+
+// D-J3: só `len` e `hash` do prompt normalizado ficam no atom; o texto não é guardado.
+async function guardarPrompt($: EngineInterface, texto: string): Promise<void> {
+  if (config === null) return
+  const t = await $.clock.now()
+  const r = await registrarPrompt(texto, t)
+  if (r !== null) await update($, prompts, atual => acrescentarPrompt(atual, r))
+}
+
+async function guardarCompactacao($: EngineInterface): Promise<void> {
+  if (config === null) return
+  const t = await $.clock.now()
+  await update($, compactacoes, atual => [...atual, t])
+}
+
+// D-C-UI: lê as fontes (livro, objetivo, sessão, mensagens, git), calcula a camada 1 e guarda o resultado no atom.
+// Chamada só pelo clique na C e por `/hsg avaliar`. Nada vai ao armazenamento persistente.
+async function avaliar($: EngineInterface): Promise<Calculo> {
+  const o = await read($, objetivo)
+  const viva = await read($, atencao)
+  const janela = janelaDe(o, null, viva)
+  let calculo: Calculo = { tipo: 'nada' }
+  if (janela !== null) {
+    const livro = await lerLivro($)
+    calculo = await calcularFatos({
+      objetivo: o,
+      fechamento: null,
+      viva,
+      registros: livro === null ? null : livro.sessoes,
+      commits: await commitsDaJanela($, janela),
+      mensagens: await tentar<readonly Mensagem[]>($.session.messages()),
+      prompts: await read($, prompts),
+      compactacoes: await read($, compactacoes),
+    })
+  }
+  await update($, resultadoC, () => calculo)
+  return calculo
+}
+
+// D-C2: o único comando externo do mod; um `git` que falha, ausente ou ilegível vira "indisponível", nunca zero.
+async function commitsDaJanela($: EngineInterface, janela: Janela): Promise<Dado<Commit[]>> {
+  const r = await tentar($.process.run(argvGitLog(janela)))
+  if (!r.ok) return { ok: false, motivo: `git: ${r.motivo}` }
+  if (r.valor.exitCode !== 0) return { ok: false, motivo: `git: ${r.valor.exitCode}` }
+  if (r.valor.isStdoutTruncated) return { ok: false, motivo: 'git: saída truncada' }
+  return parsearGitLog(r.valor.stdout, janela)
+}
+
+// Uma chamada recusada vira o motivo (Dado), sem `catch`.
+function tentar<V>(p: Promise<V>): Promise<Dado<V>> {
+  return p.then(
+    valor => ({ ok: true as const, valor }),
+    (r: unknown) => ({ ok: false as const, motivo: r instanceof Error ? r.message : String(r) }),
+  )
 }
 
 // Status do erro de versão/configuração; refeito depois de apagar-dados, que limpa o status.
