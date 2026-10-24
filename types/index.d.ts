@@ -95,14 +95,19 @@ export type Juiz = {
   gravacao?: string
 }
 
+// mod-v2-feed D-F7: objetivo e DoD da avaliação, para preencher as sugestões; só `$.state`.
+export type Alvo = { texto: string; dod: string }
+
 // D-C-UI/D-J10: o que a tela da C lê. `andamento` = chamada ao modelo em curso. `contexto` = C6 (informativo).
+// `alvo` (D-F7) = null quando a avaliação não tinha objetivo com DoD.
 export type ResultadoC = {
   calculo: Calculo
   juiz: Juiz | null
   andamento: boolean
-  // Falha de U1 (prompt não preenchido) ou de U2 (voto não gravado), com o motivo.
+  // Falha da sugestão (prompt não preenchido) ou de U2 (voto não gravado), com o motivo.
   aviso?: string
   contexto: Dado<{ tokens: number | null; window: number; percent: number | null }>
+  alvo: Alvo | null
 }
 
 declare module 'claude-code' {
@@ -119,7 +124,7 @@ declare module 'claude-code' {
       prompts: Shaped<PromptRegistro[]>
       // shape 'compactacoes-1' (D-C6): horário de cada compactação manual, automática ou de plugin.
       compactacoes: Shaped<number[]>
-      // shape 'resultadoC-2' (D-C-UI, D-P4): camada 1, resultado do juiz e C6; null = nenhum ainda.
+      // shape 'resultadoC-3' (D-C-UI, D-P4, D-F7): camada 1, resultado do juiz, C6 e `alvo`; null = nenhum ainda.
       resultadoC: Shaped<ResultadoC | null>
       // shape 'entradaC-1' (D-P4): última entrada do juiz montada pelo clique na C ou por `/hsg avaliar`.
       entradaC: Shaped<EntradaC | null>

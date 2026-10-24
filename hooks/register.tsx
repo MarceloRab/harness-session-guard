@@ -43,9 +43,12 @@ import {
 import { aplicarTransicao, temTimebox, tempoAtivoSeg, type Mutacao } from './objetivo'
 import {
   achadosDaTela,
+  arvoreEntrada,
   AVISO_OBJETIVO,
   faixa,
   interpretar,
+  linhaAntiga,
+  linhaRica,
   modeloAvaliacao,
   modeloDetalhes,
   painel,
@@ -76,7 +79,7 @@ const objetivo = atom({ plugin: 'harness-session-guard', key: 'objetivo' } as co
 // D-J3/D-C6/D-C-UI: só `$.state`. `prompts` guarda `len` e `hash` dos prompts digitados (nunca o texto).
 const prompts = atom({ plugin: 'harness-session-guard', key: 'prompts' } as const, [], { shape: 'prompts-1' })
 const compactacoes = atom({ plugin: 'harness-session-guard', key: 'compactacoes' } as const, [], { shape: 'compactacoes-1' })
-const resultadoC = atom({ plugin: 'harness-session-guard', key: 'resultadoC' } as const, null, { shape: 'resultadoC-2' })
+const resultadoC = atom({ plugin: 'harness-session-guard', key: 'resultadoC' } as const, null, { shape: 'resultadoC-3' })
 // D-P4/D-J11: a última entrada do juiz (ou o motivo de não montar); só `$.state`.
 const entradaC = atom({ plugin: 'harness-session-guard', key: 'entradaC' } as const, null, { shape: 'entradaC-1' })
 
@@ -189,6 +192,23 @@ export const register: Register = (on, options) => {
     })
   })
 
+  // D-F4: a linha do `/hsg avaliar` e do `/hsg entrada` no feed; o id do texto guardado escolhe a árvore. Só lê os atoms.
+  on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
+    const a = interpretar(e.props.args)
+    if (e.props.command !== COMANDO || (a !== 'avaliar' && a !== 'entrada')) return next(e)
+    const id = /\bid (\d+)\b/.exec(e.props.text)
+    if (id === null) return next(e)
+    const entrada = await read($, entradaC)
+    const el = $.ui.resolve(e)
+    if (entrada === null || Number(id[1]) !== entrada.t) return linhaAntiga(el, e.props.text)
+    if (a === 'entrada') return arvoreEntrada(el, textoEntrada(entrada))
+    const r = await read($, resultadoC)
+    return linhaRica(el, modeloAvaliacao(r, entrada), achadosDaTela(r, entrada), r === null ? null : r.alvo, {
+      votar: (x, voto) => votar($, x, voto),
+      sugerir: texto => sugerir($, texto),
+    })
+  })
+
   // `/hsg` e argumentos; cada execução conta como ID.
   on('command.run', { command: COMANDO }, async ($, e) => ({ text: await executar($, interpretar(e.args)) }))
 }
@@ -232,13 +252,20 @@ async function executar($: EngineInterface, a: Acao): Promise<string> {
         if (config === null) texto = `Indisponível: ${erro} · /hsg`
         else if (emAndamento) texto = 'Avaliação em andamento.'
         else {
-          await avaliar($)
-          texto = textoDetalhes(modeloAvaliacao(await read($, resultadoC), await read($, entradaC)))
+          // D-F3: o texto guardado (o que o modelo lê) é só o id; o hook `CommandOutput` desenha o resultado.
+          const t = await avaliar($)
+          if (t === null) throw new Error('harness-session-guard: avaliar não executou sem avaliação em andamento')
+          texto = `avaliação C id ${t} exibida ao dev; o resultado fica fora do contexto do modelo`
         }
         break
-      case 'entrada':
-        texto = textoEntrada(await read($, entradaC))
+      case 'entrada': {
+        const e = await read($, entradaC)
+        texto =
+          e !== null && e.ok
+            ? `entrada do juiz id ${e.t} exibida ao dev; o conteúdo fica fora do contexto do modelo`
+            : textoEntrada(e)
         break
+      }
       case 'apagar-dados':
         texto = TEXTO_APAGAR
         break
@@ -316,9 +343,10 @@ async function guardarCompactacao($: EngineInterface): Promise<void> {
 // D-C-UI: lê as fontes (livro, objetivo, sessão, mensagens, git), calcula a camada 1 e guarda o resultado no atom.
 // Chamada só pelo clique na C e por `/hsg avaliar`. Nada vai ao armazenamento persistente.
 // D-J11: monta a entrada do juiz e a guarda em `entradaC`. D-J1/D-J8: com entrada montada, chama o juiz uma vez
-// (ou reaproveita o resultado guardado de hash igual). Com uma chamada em curso, não faz nada.
-async function avaliar($: EngineInterface): Promise<void> {
-  if (emAndamento) return
+// (ou reaproveita o resultado guardado de hash igual). Com uma chamada em curso, não faz nada e devolve null;
+// senão devolve o `t` da entrada gravada (o id de D-F3).
+async function avaliar($: EngineInterface): Promise<number | null> {
+  if (emAndamento) return null
   const o = await read($, objetivo)
   const viva = await read($, atencao)
   const janela = janelaDe(o, null, viva)
@@ -354,15 +382,17 @@ async function avaliar($: EngineInterface): Promise<void> {
     entrada = montada.ok ? { t, ok: true, ...montada.valor } : { t, ok: false, motivo: montada.motivo }
   }
   await update($, entradaC, () => entrada)
-  const base = { calculo, andamento: false, contexto }
+  // D-F7: objetivo e DoD da avaliação, para as sugestões.
+  const alvo = o !== null && o.dod !== null ? { texto: o.texto, dod: o.dod } : null
+  const base = { calculo, andamento: false, contexto, alvo }
   // D-J8: hash igual e resultado `ok` no `$.state` = o guardado, sem chamada; sem resultado (ou outro hash), chama.
   if (!entrada.ok || o === null || avaliacoes === null || calculo.tipo !== 'fatos') {
     await update($, resultadoC, () => ({ ...base, juiz: anterior }))
-    return
+    return t
   }
   if (anterior !== null && anterior.hash === entrada.hash && anterior.resultado === 'ok') {
     await update($, resultadoC, () => ({ ...base, juiz: { ...anterior, reutilizado: true as const } }))
-    return
+    return t
   }
   // `julgar` marca `andamento: true` no atom; se lançar (invariante quebrado), o `finally` o desmarca, mantém o
   // juiz anterior e a exceção segue para quem chamou.
@@ -372,6 +402,7 @@ async function avaliar($: EngineInterface): Promise<void> {
   } finally {
     await update($, resultadoC, () => ({ ...base, juiz }))
   }
+  return t
 }
 
 type PedidoJuiz = {
@@ -471,6 +502,16 @@ async function votar($: EngineInterface, a: Achado, voto: Voto): Promise<void> {
     const achados = r.juiz.achados.map(x => (x.dim === a.dim && x.h === a.h ? { ...x, voto } : x))
     return { ...semAviso(r), juiz: { ...r.juiz, achados } }
   })
+}
+
+// D-F8: acrescenta o template à caixa (separado do rascunho por uma linha em branco) e nunca envia.
+async function sugerir($: EngineInterface, texto: string): Promise<void> {
+  const caixa = await tentar($.prompt.read())
+  if (!caixa.ok) return avisar($, `o prompt não foi preenchido: ${caixa.motivo}`)
+  const separador = caixa.valor.text.trim() === '' ? '' : '\n\n'
+  const r = await tentar($.prompt.fill({ text: separador + texto, mode: 'append' }))
+  if (!r.ok) return avisar($, `o prompt não foi preenchido: ${r.motivo}`)
+  await avisar($, r.valor.isFilled ? undefined : `o prompt não foi preenchido (${r.valor.refusal ?? 'recusado por um hook'})`)
 }
 
 async function avisar($: EngineInterface, aviso: string | undefined): Promise<void> {

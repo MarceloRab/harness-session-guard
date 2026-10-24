@@ -1,12 +1,13 @@
 // Emissão (mod-v2 D-T10): um modelo de detalhes puro e as árvores/textos que saem dele.
 import type { EngineInterface } from 'claude-code'
 
-import type { Achado, Dado, EntradaC, Fatos, Juiz, Objetivo, ResultadoC, Sessao, Voto } from '../types'
+import type { Achado, Alvo, Dado, EntradaC, Fatos, Juiz, Objetivo, ResultadoC, Sessao, Voto } from '../types'
 import { formatarRelogio, intervalosDe, medir, sessaoSeg, type Cor, type Medida } from './atencao'
 import type { ConfigResolvida } from './config'
 import { CHAVES_APAGAR, type Livro } from './livro'
 import { parsearObjetivo, tempoAtivoSeg, type ComandoObjetivo } from './objetivo'
 import { DIMENSOES } from './resultado'
+import { ruim, sugestoes } from './sugestoes'
 
 export const TITULO = 'harness-session-guard'
 
@@ -316,6 +317,71 @@ export function painelAvaliacao(el: El, linhas: readonly Linha[], achados: reado
           ))}
         </Box>
       ))}
+    </Box>
+  )
+}
+
+export type AcoesLinha = AcoesAchado & {
+  sugerir: (texto: string) => Promise<void> // D-F8: acrescenta o template à caixa, sem enviar
+}
+
+// D-F4/D-F5/D-F6: a árvore da linha do `/hsg avaliar` no feed: as linhas do modelo, os votos por achado e, quando a
+// avaliação é ruim, os botões de sugestão (o terminal desenha `[ rótulo ]`).
+export function linhaRica(el: El, linhas: readonly Linha[], achados: readonly Achado[], alvo: Alvo | null, acoes: AcoesLinha) {
+  const { Box, Text, Button } = el
+  return (
+    <Box flexDirection="column">
+      {linhas.map(x => (
+        <Text dimColor={x.fraco}>{x.texto}</Text>
+      ))}
+      {achados.map(a => (
+        <Box flexDirection="row" gap={1}>
+          <Text>{a.dim}</Text>
+          {VOTOS.map(v => (
+            <Button key={`hsg-u2-${a.dim}-${v.voto}`} onPress={() => acoes.votar(a, v.voto)}>
+              <Text>{v.rotulo}</Text>
+            </Button>
+          ))}
+        </Box>
+      ))}
+      {ruim(achados) &&
+        (alvo === null ? (
+          <Text>Sugestões indisponíveis: avaliação sem objetivo e DoD</Text>
+        ) : (
+          <Box flexDirection="column">
+            <Text>Sugestões de prompt (escrevem na caixa, não enviam):</Text>
+            <Box flexDirection="row" gap={1}>
+              {sugestoes(achados, alvo).map(s => (
+                <Button key={`hsg-s-${s.dim}`} onPress={() => acoes.sugerir(s.texto)}>
+                  <Text>{s.rotulo}</Text>
+                </Button>
+              ))}
+            </Box>
+          </Box>
+        ))}
+    </Box>
+  )
+}
+
+// D-F4: a árvore da linha do `/hsg entrada` no feed, uma `Text` por linha.
+export function arvoreEntrada(el: El, texto: string) {
+  const { Box, Text } = el
+  return (
+    <Box flexDirection="column">
+      {texto.split('\n').map(x => (
+        <Text>{x}</Text>
+      ))}
+    </Box>
+  )
+}
+
+// D-F4: linha de uma avaliação ou entrada que não é a da memória: o texto guardado, esmaecido, e o aviso, sem botões.
+export function linhaAntiga(el: El, texto: string) {
+  const { Box, Text } = el
+  return (
+    <Box flexDirection="column">
+      <Text dimColor>{texto}</Text>
+      <Text>Detalhes fora da memória: substituídos por uma avaliação mais nova ou a sessão foi reiniciada · /hsg avaliar</Text>
     </Box>
   )
 }
