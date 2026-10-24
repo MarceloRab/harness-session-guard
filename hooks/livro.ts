@@ -1,8 +1,9 @@
 // Persistência v1 no `$.store` (design M2 D14–D16, D19). Único arquivo que toca `$.store`.
 // Regras puras (validação, poda, upsert, medida) primeiro; I/O depois.
+import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { Nivel } from '../types'
+import type { ErroDados, Nivel } from '../types'
 import type { Registro } from './atencao'
 import type { CampoConfig } from './config'
 
@@ -23,7 +24,6 @@ export type Codigo =
   | 'amanha'
 export type Evento = { t: number; tipo: TipoEvento; nivel?: Nivel; codigo?: Codigo }
 export type Diario = { formato: 1; eventos: Evento[] }
-export type ErroDados = { codigo: Codigo; detalhe: string | null }
 
 const DIA_MS = 86_400_000
 const TRINTA_DIAS_MS = 30 * DIA_MS
@@ -84,8 +84,10 @@ const DIARIO: Desc<Diario> = {
   cheio: 'diario-cheio',
 }
 
+// Erro corrente num atom: a faixa o lê e redesenha quando ele muda. Zerado em `iniciarLivro`.
+const erroAtom = atom({ plugin: 'harness-session-guard', key: 'erro' } as const, null, { shape: 'erro-1' })
+
 // Estado do módulo: recomeça a cada reload e é refeito em session.start (`iniciarLivro`).
-let erro: ErroDados | null = null
 let debug = false
 let ultimaGravacao: number | null = null
 
@@ -95,10 +97,11 @@ let ultimaGravacao: number | null = null
 export async function iniciarLivro($: EngineInterface): Promise<void> {
   debug = (await $.env.get('HSG_DEBUG')) === '1'
   if (debug) $.ui.log(`harness-session-guard tz=${new Date().getTimezoneOffset()}`)
+  await update($, erroAtom, () => null)
 }
 
-export function erroCorrente(): ErroDados | null {
-  return erro
+export async function erroCorrente($: EngineInterface): Promise<ErroDados | null> {
+  return read($, erroAtom)
 }
 
 // D16: grava se nunca gravou neste módulo ou se passaram 60 s desde a última gravação.
@@ -123,23 +126,23 @@ export async function gravarRegistro($: EngineInterface, r: Registro, agora: num
   if (await gravar($, LIVRO, agora, v => upsert(v, r))) ultimaGravacao = agora
 }
 
-// D8: silenciar 1h ou até o dia local seguinte à hora `inicio`.
+// D8: silenciar 1h ou até o dia local seguinte à hora `inicio`. Devolve o `ate` gravado, ou `null` se não gravou.
 export async function silenciar(
   $: EngineInterface,
   modo: '1h' | 'amanha',
   agora: number,
   inicio: number,
-): Promise<void> {
+): Promise<number | null> {
   const ate = modo === '1h' ? agora + HORA_MS : amanhaAs(agora, inicio)
-  if (await gravar($, SILENCIO, agora, v => ({ ...v, ate }))) {
-    await registrarEvento($, { t: agora, tipo: 'silenciar', codigo: modo })
-  }
+  if (!(await gravar($, SILENCIO, agora, v => ({ ...v, ate })))) return null
+  await registrarEvento($, { t: agora, tipo: 'silenciar', codigo: modo })
+  return ate
 }
 
-export async function reativar($: EngineInterface, agora: number): Promise<void> {
-  if (await gravar($, SILENCIO, agora, v => ({ ...v, ate: null }))) {
-    await registrarEvento($, { t: agora, tipo: 'reativar' })
-  }
+export async function reativar($: EngineInterface, agora: number): Promise<boolean> {
+  if (!(await gravar($, SILENCIO, agora, v => ({ ...v, ate: null })))) return false
+  await registrarEvento($, { t: agora, tipo: 'reativar' })
+  return true
 }
 
 // D18: `explicado.t` vira `true` depois da primeira explicação.
@@ -156,7 +159,7 @@ export async function registrarEvento($: EngineInterface, e: Evento): Promise<vo
 // `/hsg apagar-dados confirmar`: remove as 4 chaves e limpa o erro de dados.
 export async function apagarDados($: EngineInterface): Promise<void> {
   for (const chave of CHAVES) await $.store.delete(chave)
-  erro = null
+  await update($, erroAtom, () => null)
   ultimaGravacao = null
   $.ui.status(undefined)
 }
@@ -280,7 +283,8 @@ async function gravar<V>($: EngineInterface, d: Desc<V>, agora: number, mudar: (
   return true
 }
 
-// O erro mais recente fica no módulo e no status; a mensagem da recusa nunca vai para o store.
+// O erro mais recente fica no atom e no status; a mensagem da recusa nunca vai para o store.
+// O mesmo erro, enquanto é o corrente, é registrado uma vez (a faixa e o painel releem o store a cada desenho).
 // `noDiario` é falso quando o erro vem do próprio diário (gravar nele de novo repetiria a falha).
 async function falhar(
   $: EngineInterface,
@@ -289,7 +293,9 @@ async function falhar(
   agora: number | null,
   noDiario: boolean,
 ): Promise<void> {
-  erro = { codigo, detalhe }
+  const corrente = await read($, erroAtom)
+  if (corrente !== null && corrente.codigo === codigo && corrente.detalhe === detalhe) return
+  await update($, erroAtom, () => ({ codigo, detalhe }))
   $.ui.status(`harness-session-guard: ${codigo}${detalhe === null ? '' : `: ${detalhe}`} · /hsg`)
   if (noDiario) await registrarEvento($, { t: agora ?? (await $.clock.now()), tipo: 'erro', codigo })
 }

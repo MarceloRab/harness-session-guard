@@ -13,7 +13,7 @@ export type Aplicado = { atual: Sessao; fechada: Sessao | null }
 
 const DIA_MS = 86_400_000
 const TRINTA_DIAS_MS = 30 * DIA_MS
-const ORDEM: Record<Nivel, number> = { neutro: 0, atencao: 1, alerta: 2 }
+export const ORDEM: Record<Nivel, number> = { neutro: 0, atencao: 1, alerta: 2 }
 const DIAS_TRABALHO: Record<Dias, readonly number[]> = {
   'seg-sex': [1, 2, 3, 4, 5],
   'seg-sab': [1, 2, 3, 4, 5, 6],
