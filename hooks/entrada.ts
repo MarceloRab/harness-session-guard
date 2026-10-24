@@ -27,10 +27,13 @@ export type DadosEntrada = {
   fatos: Fatos | null
   mensagens: Dado<MensagensCasadas>
   avaliacoes: Avaliacoes | null // null = incompatível (já relatado pelo chamador)
+  // mod-v2-avaliar D-A3: a marca (`ateTurno` da última avaliação `ok` deste objetivo, em memória); null = sem marca.
+  ateTurno: number | null
 }
 
 // `evidencia`: os itens de texto enviados (prompts digitados e texto do agente, normalizados), para a C1.
-export type EntradaMontada = { blocos: Bloco[]; hash: string; evidencia: string[] }
+// `ultimoTurno` (D-A2): o `k` do último turno enviado.
+export type EntradaMontada = { blocos: Bloco[]; hash: string; evidencia: string[]; ultimoTurno: number }
 
 // D-J6: objeto JSON com chaves ordenadas (recursivamente) e strings em NFC, com espaços colapsados e trim.
 export function canonico(valor: unknown): string {
@@ -119,16 +122,20 @@ export async function montarEntrada(d: DadosEntrada): Promise<Dado<EntradaMontad
   const corte = cortarEvidencia(turnos)
   if (!corte.ok) return corte
 
+  // D-A3: depois da marca; sem marca, o primeiro turno do objetivo.
+  const avalieAPartirDoTurno = d.ateTurno === null ? (turnos[0] as Turno).k : d.ateTurno + 1
   const blocos: Bloco[] = [
     { text: RUBRICA_V1, cache: true },
     { text: canonico({ objetivo: { texto: o.texto, dod: o.dod, timeboxMin: o.timeboxMin, abertoEm: new Date(o.abertoEm).toISOString() } }) },
     { text: canonico({ fatos: fatosDaEntrada(d.fatos) }) },
     { text: textoEvidencia(corte.valor.turnos.map(textoTurno), corte.valor.omitidos) },
-    { text: canonico({ jaApontados: jaApontados(d.avaliacoes, o), avalieAPartirDoTurno: turnoInicial(turnos, d.avaliacoes, o) }) },
+    { text: canonico({ jaApontados: jaApontados(d.avaliacoes, o), avalieAPartirDoTurno }) },
   ]
   const hash = await hashEntrada(blocos)
   const evidencia = corte.valor.turnos.flatMap(t => [t.prompt, ...t.agente]).map(normalizar)
-  return { ok: true, valor: { blocos, hash, evidencia } }
+  // `cortarEvidencia` só devolve ok com pelo menos o turno mais recente.
+  const ultimoTurno = (corte.valor.turnos.at(-1) as Turno).k
+  return { ok: true, valor: { blocos, hash, evidencia, ultimoTurno } }
 }
 
 // D-J8.
@@ -143,16 +150,6 @@ export function jaApontados(a: Avaliacoes, o: Objetivo): { dim: string; h: strin
     .filter(x => x.t >= o.abertoEm)
     .map(x => ({ dim: x.dim, h: x.h }))
     .sort((x, y) => (x.dim === y.dim ? (x.h < y.h ? -1 : x.h > y.h ? 1 : 0) : x.dim < y.dim ? -1 : 1))
-}
-
-// D-J4: primeiro turno depois do último avaliado deste objetivo (o último registro de `objetivos` do objetivo marca
-// o instante da avaliação: turnos com prompt até então já foram avaliados); sem avaliação, o primeiro turno.
-function turnoInicial(turnos: readonly Turno[], a: Avaliacoes, o: Objetivo): number {
-  const avaliadas = a.objetivos.filter(x => x.objetivoId === o.id).map(x => x.t)
-  if (avaliadas.length === 0) return (turnos[0] as Turno).k
-  const ate = Math.max(...avaliadas)
-  const proximo = turnos.find(t => t.t > ate)
-  return proximo === undefined ? (turnos.at(-1) as Turno).k + 1 : proximo.k
 }
 
 // D-J4(3): a camada 1 como dados; durações até o último evento (sem "agora"); fonte que falhou vai como `indisponivel`.

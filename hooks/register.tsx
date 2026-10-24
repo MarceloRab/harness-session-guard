@@ -74,9 +74,9 @@ const objetivo = atom({ plugin: 'harness-session-guard', key: 'objetivo' } as co
 // D-J3/D-C6/D-C-UI: só `$.state`. `prompts` guarda `len` e `hash` dos prompts digitados (nunca o texto).
 const prompts = atom({ plugin: 'harness-session-guard', key: 'prompts' } as const, [], { shape: 'prompts-1' })
 const compactacoes = atom({ plugin: 'harness-session-guard', key: 'compactacoes' } as const, [], { shape: 'compactacoes-1' })
-const resultadoC = atom({ plugin: 'harness-session-guard', key: 'resultadoC' } as const, null, { shape: 'resultadoC-3' })
+const resultadoC = atom({ plugin: 'harness-session-guard', key: 'resultadoC' } as const, null, { shape: 'resultadoC-4' })
 // D-P4/D-J11: a última entrada do juiz (ou o motivo de não montar); só `$.state`.
-const entradaC = atom({ plugin: 'harness-session-guard', key: 'entradaC' } as const, null, { shape: 'entradaC-1' })
+const entradaC = atom({ plugin: 'harness-session-guard', key: 'entradaC' } as const, null, { shape: 'entradaC-2' })
 // D-F1: o aviso do último clique na T/C (caixa com texto ou indisponível); só `$.state`.
 const avisoFaixa = atom({ plugin: 'harness-session-guard', key: 'avisoFaixa' } as const, null, { shape: 'avisoFaixa-1' })
 
@@ -347,6 +347,8 @@ async function avaliar($: EngineInterface): Promise<number | null> {
   const t = await $.clock.now()
   const contexto = await contextoC6($)
   const anterior = (await read($, resultadoC))?.juiz ?? null
+  // D-A3: a marca é o juiz anterior `ok` deste objetivo; resultado com erro não é marca (MUST-04).
+  const marca = o !== null && anterior !== null && anterior.resultado === 'ok' && anterior.objetivoId === o.id ? anterior : null
   let calculo: Calculo = { tipo: 'nada' }
   let entrada: EntradaC = { t, ok: false, motivo: MOTIVO_SEM_OBJETIVO }
   let avaliacoes: Avaliacoes | null = null
@@ -372,6 +374,7 @@ async function avaliar($: EngineInterface): Promise<number | null> {
       fatos: calculo.tipo === 'fatos' ? calculo.fatos : null,
       mensagens,
       avaliacoes,
+      ateTurno: marca === null ? null : marca.ateTurno,
     })
     entrada = montada.ok ? { t, ok: true, ...montada.valor } : { t, ok: false, motivo: montada.motivo }
   }
@@ -388,11 +391,19 @@ async function avaliar($: EngineInterface): Promise<number | null> {
     await update($, resultadoC, () => ({ ...base, juiz: { ...anterior, reutilizado: true as const } }))
     return t
   }
+  // D-A4/D-A6: depois de D-J8 (`entrada.ok` já garantido acima), sem turno novo desde a marca: mantém o juiz anterior,
+  // sem chamar o modelo e sem gravar no armazenamento persistente.
+  if (marca !== null && entrada.ultimoTurno <= marca.ateTurno) {
+    await update($, resultadoC, () => ({ ...base, juiz: anterior, semTurnoNovo: true as const }))
+    return t
+  }
+  // D-A2: com turno do agente aberto no início, o último turno enviado ainda não terminou e não conta como avaliado.
+  const ateTurno = viva === null || viva.turnoAberto === null ? entrada.ultimoTurno : entrada.ultimoTurno - 1
   // `julgar` marca `andamento: true` no atom; se lançar (invariante quebrado), o `finally` o desmarca, mantém o
   // juiz anterior e a exceção segue para quem chamou.
   let juiz = anterior
   try {
-    juiz = await julgar($, { entrada, objetivo: o, fatos: calculo.fatos, avaliacoes }, { ...base, juiz: anterior })
+    juiz = await julgar($, { entrada, objetivo: o, fatos: calculo.fatos, avaliacoes, ateTurno }, { ...base, juiz: anterior })
   } finally {
     await update($, resultadoC, () => ({ ...base, juiz }))
   }
@@ -404,6 +415,7 @@ type PedidoJuiz = {
   objetivo: Objetivo
   fatos: Fatos
   avaliacoes: Avaliacoes
+  ateTurno: number // D-A2
 }
 
 // D-J1: o ÚNICO ponto que chama o modelo: sem histórico e sem `system`, o bloco de regras com `cache: true`, os
@@ -420,26 +432,28 @@ async function julgar($: EngineInterface, p: PedidoJuiz, antes: ResultadoC): Pro
   }
   const t = await $.clock.now()
   const hash = p.entrada.hash
+  // D-A1: a marca vai em todos os ramos, inclusive nos de erro.
+  const marca = { objetivoId: p.objetivo.id, ateTurno: p.ateTurno }
   // Pedido recusado antes de enviar (ex.: id fora da lista permitida): sem `usage`, nada a gravar.
-  if (!resposta.ok) return { hash, t, resultado: 'api-error', achados: [], usage: null, motivo: resposta.motivo }
+  if (!resposta.ok) return { hash, t, ...marca, resultado: 'api-error', achados: [], usage: null, motivo: resposta.motivo }
   const r = resposta.valor
   if (!r.isAnswered) {
     const motivo = r.reason === 'api-error' ? `status ${r.status ?? 'sem resposta'} · ${r.error}` : undefined
     const status = r.reason === 'api-error' ? { status: r.status } : {}
     const gravacao = await gravarResultado($, p, { t, hash, usage: r.usage, resultado: r.reason, citacoesDescartadas: 0, ...status }, [])
-    return { hash, t, resultado: r.reason, achados: [], usage: r.usage, ...(motivo === undefined ? {} : { motivo }), ...gravacao }
+    return { hash, t, ...marca, resultado: r.reason, achados: [], usage: r.usage, ...(motivo === undefined ? {} : { motivo }), ...gravacao }
   }
   const resposta2 = parsearResposta(r.text)
   if (!resposta2.ok) {
     const gravacao = await gravarResultado($, p, { t, hash, usage: r.usage, resultado: 'json-invalido', citacoesDescartadas: 0 }, [])
-    return { hash, t, resultado: 'json-invalido', achados: [], usage: r.usage, motivo: resposta2.motivo, ...gravacao }
+    return { hash, t, ...marca, resultado: 'json-invalido', achados: [], usage: r.usage, motivo: resposta2.motivo, ...gravacao }
   }
   const { achados: candidatos, descartados } = await conferirCitacoes(resposta2.valor, p.entrada.evidencia)
   const achados = aplicarY3(candidatos, descartados, jaApontados(p.avaliacoes, p.objetivo))
   const novos = achados.filter(a => a.estado === 'novo').map(a => ({ dim: a.dim, h: a.h, t }))
   const clique = { t, hash, usage: r.usage, resultado: 'ok' as const, citacoesDescartadas: descartados.size }
   const gravacao = await gravarResultado($, p, clique, novos)
-  return { hash, t, resultado: 'ok', achados, usage: r.usage, ...gravacao }
+  return { hash, t, ...marca, resultado: 'ok', achados, usage: r.usage, ...gravacao }
 }
 
 // D-J13: `cliques` + `objetivos` (camada 1, só números) e os achados novos (Y3). Devolve `{ gravacao }` com o código do

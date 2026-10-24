@@ -139,7 +139,7 @@ export function modeloAvaliacao(r: ResultadoC | null, entrada: EntradaC | null):
   if (r.andamento) l('Avaliação em andamento…')
   if (r.aviso !== undefined) l(`Aviso: ${r.aviso}`)
   const j = juizVisivel(r, entrada)
-  if (j !== null) linhasJuiz(j, l)
+  if (j !== null) linhasJuiz(j, r.semTurnoNovo === true, l)
   l(
     r.contexto.ok
       ? `Contexto da sessão: ${r.contexto.valor.tokens ?? 'sem medida'} tokens de ${r.contexto.valor.window}${r.contexto.valor.percent === null ? '' : ` (${r.contexto.valor.percent}%)`}`
@@ -152,9 +152,12 @@ export function modeloAvaliacao(r: ResultadoC | null, entrada: EntradaC | null):
   return linhas
 }
 
-// O resultado do juiz só vale para a entrada atual (mesmo hash); de outra entrada ele não é mostrado.
+// O resultado do juiz só vale para a entrada atual (mesmo hash) ou quando foi mantido sem turno novo (D-A5);
+// de outra entrada ele não é mostrado.
 function juizVisivel(r: ResultadoC, entrada: EntradaC | null): Juiz | null {
-  return r.juiz !== null && entrada !== null && entrada.ok && entrada.hash === r.juiz.hash ? r.juiz : null
+  return r.juiz !== null && entrada !== null && entrada.ok && (entrada.hash === r.juiz.hash || r.semTurnoNovo === true)
+    ? r.juiz
+    : null
 }
 
 // Os achados com botões na tela: os descartados (citação não encontrada) ficam só como linha de texto.
@@ -163,8 +166,9 @@ export function achadosDaTela(r: ResultadoC | null, entrada: EntradaC | null): A
   return j === null ? [] : j.achados.filter(a => a.estado !== 'descartado')
 }
 
-function linhasJuiz(j: Juiz, l: (texto: string, fraco?: boolean) => number): void {
+function linhasJuiz(j: Juiz, semTurnoNovo: boolean, l: (texto: string, fraco?: boolean) => number): void {
   if (j.reutilizado === true) l('Resultado guardado, sem custo: a entrada não mudou desde a última avaliação.')
+  if (semTurnoNovo) l(`Sem turnos novos desde a avaliação das ${hora(j.t)}: resultado do juiz mantido, sem nova chamada.`)
   if (j.resultado !== 'ok') l(`Juiz: ${j.resultado}${j.motivo === undefined ? '' : ` · ${j.motivo}`}`)
   else {
     for (const dim of DIMENSOES) {

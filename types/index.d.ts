@@ -55,8 +55,9 @@ export type Bloco = { text: string; cache?: true }
 
 // D-P4/D-J11: a última entrada do juiz (ou o motivo de não montar); só `$.state`. `t` não entra no hash.
 // `evidencia` = os itens de texto (prompt digitado e texto do agente, normalizados) realmente enviados: a base da C1.
+// `ultimoTurno` (mod-v2-avaliar D-A2) = o `k` do último turno enviado na evidência.
 export type EntradaC = { t: number } & (
-  | { ok: true; blocos: Bloco[]; hash: string; evidencia: string[] }
+  | { ok: true; blocos: Bloco[]; hash: string; evidencia: string[]; ultimoTurno: number }
   | { ok: false; motivo: string }
 )
 
@@ -83,9 +84,13 @@ export type Achado = {
 
 // D-P4: o resultado do juiz; só `$.state`. `reutilizado` = hash igual ao da avaliação anterior, sem chamada.
 // `gravacao` = o código do erro se a escrita em `avaliacoes` falhou (a avaliação continua visível).
+// mod-v2-avaliar D-A1: `objetivoId` = o `Objetivo.id` avaliado; `ateTurno` = o maior `k` considerado avaliado.
+// Só um `Juiz` com `resultado === 'ok'` serve de marca.
 export type Juiz = {
   hash: string
   t: number
+  objetivoId: string
+  ateTurno: number
   resultado: 'ok' | 'json-invalido' | 'api-error' | 'empty-reply' | 'aborted'
   achados: Achado[]
   // null = a chamada foi recusada antes de enviar (nenhum custo medido; nada é inventado).
@@ -100,10 +105,12 @@ export type Alvo = { texto: string; dod: string }
 
 // D-C-UI/D-J10: o que a tela da C lê. `andamento` = chamada ao modelo em curso. `contexto` = C6 (informativo).
 // `alvo` (D-F7) = null quando a avaliação não tinha objetivo com DoD.
+// `semTurnoNovo` (mod-v2-avaliar D-A4/D-A5) = juiz mantido sem chamada por falta de turno novo; ausente fora disso.
 export type ResultadoC = {
   calculo: Calculo
   juiz: Juiz | null
   andamento: boolean
+  semTurnoNovo?: true
   // Falha da sugestão (prompt não preenchido) ou de U2 (voto não gravado), com o motivo.
   aviso?: string
   contexto: Dado<{ tokens: number | null; window: number; percent: number | null }>
@@ -124,9 +131,9 @@ declare module 'claude-code' {
       prompts: Shaped<PromptRegistro[]>
       // shape 'compactacoes-1' (D-C6): horário de cada compactação manual, automática ou de plugin.
       compactacoes: Shaped<number[]>
-      // shape 'resultadoC-3' (D-C-UI, D-P4, D-F7): camada 1, resultado do juiz, C6 e `alvo`; null = nenhum ainda.
+      // shape 'resultadoC-4' (D-C-UI, D-P4, D-F7, D-A1/D-A5): camada 1, resultado do juiz, C6 e `alvo`; null = nenhum ainda.
       resultadoC: Shaped<ResultadoC | null>
-      // shape 'entradaC-1' (D-P4): última entrada do juiz montada pelo clique na C ou por `/hsg avaliar`.
+      // shape 'entradaC-2' (D-P4, D-A2): última entrada do juiz montada pelo clique na C ou por `/hsg avaliar`.
       entradaC: Shaped<EntradaC | null>
       // shape 'avisoFaixa-1' (mod-v2-feed D-F1): o aviso do último clique na T/C, ao lado das bolinhas; null = nenhum.
       avisoFaixa: Shaped<string | null>
