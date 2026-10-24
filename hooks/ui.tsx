@@ -1,7 +1,7 @@
 // Emissão (mod-v2 D-T10): um modelo de detalhes puro e as árvores/textos que saem dele.
 import type { EngineInterface } from 'claude-code'
 
-import type { Achado, Alvo, Dado, EntradaC, Fatos, Juiz, Objetivo, ResultadoC, Sessao, Voto } from '../types'
+import type { Achado, Alvo, Dado, Dimensao, EntradaC, Fatos, Juiz, Objetivo, ResultadoC, Sessao, Voto } from '../types'
 import { formatarRelogio, intervalosDe, medir, sessaoSeg, type Cor, type Medida } from './atencao'
 import type { ConfigResolvida } from './config'
 import { CHAVES_APAGAR, type Livro } from './livro'
@@ -126,30 +126,139 @@ export function textoDetalhes(linhas: readonly Linha[]): string {
   return linhas.map(x => x.texto).join('\n')
 }
 
-// D-C-UI: o único modelo da camada 1; a linha do `/hsg avaliar` no feed desenha estas linhas.
-// Fonte que falhou aparece como "indisponível (motivo)" na linha do fato; as demais linhas continuam.
-// D-J10: depois da camada 1 e da entrada vêm o resultado do juiz (se for o desta entrada), o C6, o custo e os avisos.
-export function modeloAvaliacao(r: ResultadoC | null, entrada: EntradaC | null): Linha[] {
-  if (r === null) return [{ texto: 'Nenhuma avaliação ainda: clique em C ou use /hsg avaliar.', fraco: false }]
+// mod-v2-avaliar D-B3: um eixo por dimensão; `achado` = o não descartado (com votos), `citacao` já cortada.
+export type Eixo = { dim: Dimensao; rotulo: string; cor: string; texto: string; citacao: string | null; achado: Achado | null }
+// D-B4: `cor` null = "indisponível".
+export type Laudo = { texto: string; cor: string | null }
+// D-B1: as seções da linha do `/hsg avaliar` no feed.
+export type ModeloAvaliacao = { topo: Linha[]; eixos: Eixo[]; laudo: Laudo | null; rodape: Linha[] }
+
+const EIXO: Record<Dimensao, { rotulo: string; cor: string; resumo: Record<1 | 2, string> }> = {
+  dod: {
+    rotulo: 'DoD',
+    cor: '#5f87d7',
+    resumo: { 1: 'DoD cumprido em parte ou sem mostrar a entrega', 2: 'item do DoD não entregue ou declarado sem prova' },
+  },
+  suposicao: {
+    rotulo: 'Suposição',
+    cor: '#af5faf',
+    resumo: { 1: 'suposição plausível seguida sem avisar', 2: 'suposição que muda o resultado ou contraria o dev' },
+  },
+  tangente: {
+    rotulo: 'Tangente',
+    cor: '#af8700',
+    resumo: { 1: 'proposta fora do DoD', 2: 'mudança fora do DoD executada' },
+  },
+  semLastro: {
+    rotulo: 'Sem lastro',
+    cor: '#008787',
+    resumo: { 1: 'afirmação com apoio só indireto', 2: 'afirmação sem nenhuma evidência na conversa' },
+  },
+}
+
+// D-C-UI/D-B1: o único modelo da linha do `/hsg avaliar` no feed (o hook só chama com a entrada da memória).
+// Fonte que falhou aparece como "<nome> indisponível (motivo)" na posição do fato; as demais continuam.
+export function modeloAvaliacao(r: ResultadoC | null, entrada: EntradaC): ModeloAvaliacao {
+  if (r === null) {
+    return { topo: [{ texto: 'Nenhuma avaliação ainda: clique em C ou use /hsg avaliar.', fraco: false }], eixos: [], laudo: null, rodape: [] }
+  }
+  const j = juizVisivel(r, entrada)
+  return {
+    topo: topo(r, j),
+    eixos: j === null || j.resultado !== 'ok' ? [] : DIMENSOES.map(dim => eixo(j, dim)),
+    laudo: laudo(r, entrada, j),
+    rodape: rodape(r, j),
+  }
+}
+
+// D-B2: camada 1 numa linha, as fracas só com valor > 0 e as linhas de estado.
+function topo(r: ResultadoC, j: Juiz | null): Linha[] {
   const linhas: Linha[] = []
   const l = (texto: string, fraco = false) => linhas.push({ texto, fraco })
   if (r.calculo.tipo === 'nada') l('Nada a calcular: sem objetivo e sem sessão de atenção aberta.')
-  else camada1(r.calculo.fatos, l)
-  if (entrada !== null) l(linhaEntrada(entrada))
-  if (r.andamento) l('Avaliação em andamento…')
+  else {
+    const f = r.calculo.fatos
+    l(linhaCamada1(f))
+    if (f.compactacoes.length > 0) l(`Histórico anterior a ${hora(Math.max(...f.compactacoes))} compactado`, true)
+    if (f.semMensagem.ok && f.semMensagem.valor > 0) l(`${f.semMensagem.valor} prompts sem mensagem correspondente`, true)
+    if (f.mensagensSemRegistro.ok && f.mensagensSemRegistro.valor > 0) {
+      l(`${f.mensagensSemRegistro.valor} mensagens do dev sem registro (omitidas)`, true)
+    }
+  }
   if (r.aviso !== undefined) l(`Aviso: ${r.aviso}`)
-  const j = juizVisivel(r, entrada)
-  if (j !== null) linhasJuiz(j, r.semTurnoNovo === true, l)
-  l(
-    r.contexto.ok
-      ? `Contexto da sessão: ${r.contexto.valor.tokens ?? 'sem medida'} tokens de ${r.contexto.valor.window}${r.contexto.valor.percent === null ? '' : ` (${r.contexto.valor.percent}%)`}`
-      : `Contexto da sessão: indisponível (${r.contexto.motivo})`,
-    true,
-  )
-  l('O resultado do juiz não entra no custo da sessão nem no /usage.', true)
-  l('O juiz não vê CLAUDE.md nem skills: um DoD que remete a eles não é verificável.', true)
-  l('O modelo julga a conversa e o resultado não é determinístico.', true)
+  if (r.andamento) l('Avaliação em andamento…')
+  if (j !== null) {
+    if (j.reutilizado === true) l('Resultado guardado, sem custo: a entrada não mudou desde a última avaliação.')
+    if (r.semTurnoNovo === true) l(`Sem turnos novos desde a avaliação das ${hora(j.t)}: resultado do juiz mantido, sem nova chamada.`)
+    if (j.gravacao !== undefined) l(`Não gravado em avaliacoes: ${j.gravacao}`)
+  }
   return linhas
+}
+
+// D-B3: o eixo de uma dimensão do juiz `ok`.
+function eixo(j: Juiz, dim: Dimensao): Eixo {
+  const { rotulo, cor, resumo } = EIXO[dim]
+  const a = j.achados.find(x => x.dim === dim)
+  if (a === undefined) return { dim, rotulo, cor, texto: `${rotulo} · nada a apontar`, citacao: null, achado: null }
+  if (a.estado === 'descartado') {
+    return { dim, rotulo, cor, texto: `${rotulo} · descartado: citação não encontrada`, citacao: null, achado: null }
+  }
+  const jaApontado = a.estado === 'ja-apontado' ? ' · já apontado' : ''
+  const voto = a.voto === undefined ? '' : ` · voto: ${(VOTOS.find(v => v.voto === a.voto) as { rotulo: string }).rotulo}`
+  return {
+    dim,
+    rotulo,
+    cor,
+    texto: `${rotulo} · nível ${a.nivel}${jaApontado} · ${resumo[a.nivel]}${voto}`,
+    citacao: `  "${cortar160(a.citacao)}"`,
+    achado: a,
+  }
+}
+
+// D-B3: a citação cortada em 160 code points, com `…` só quando maior.
+function cortar160(citacao: string): string {
+  const cs = Array.from(citacao)
+  return cs.length > 160 ? `${cs.slice(0, 160).join('')}…` : citacao
+}
+
+// D-B4: os sete ramos, nesta ordem, sobre os achados não descartados (já apontados incluídos).
+function laudo(r: ResultadoC, entrada: EntradaC, j: Juiz | null): Laudo | null {
+  if (r.calculo.tipo === 'nada' || r.andamento) return null
+  if (!entrada.ok) return { texto: `Laudo: indisponível · ${entrada.motivo}`, cor: null }
+  if (j === null) return { texto: 'Laudo: indisponível · o juiz não respondeu nesta avaliação', cor: null }
+  if (j.resultado !== 'ok') {
+    return { texto: `Laudo: indisponível · juiz ${j.resultado}${j.motivo === undefined ? '' : ` · ${j.motivo}`}`, cor: null }
+  }
+  const rotulos = (nivel: 1 | 2) =>
+    DIMENSOES.filter(dim => j.achados.some(a => a.dim === dim && a.estado !== 'descartado' && a.nivel === nivel))
+      .map(dim => EIXO[dim].rotulo)
+      .join(', ')
+  const n2 = rotulos(2)
+  if (n2 !== '') return { texto: `Laudo: ruim · nível 2 em ${n2}`, cor: 'error' }
+  const n1 = rotulos(1)
+  if (n1 !== '') return { texto: `Laudo: atenção · indício em ${n1}`, cor: 'warning' }
+  return { texto: 'Laudo: sem apontamentos', cor: 'success' }
+}
+
+// D-B5: custo do juiz (ou o aviso fixo) e o contexto da sessão, as duas fracas.
+function rodape(r: ResultadoC, j: Juiz | null): Linha[] {
+  let custo: string
+  if (j === null) custo = 'O juiz não vê CLAUDE.md nem skills, não entra no /usage e não é determinístico.'
+  else {
+    const u = j.usage
+    const numeros =
+      u === null
+        ? 'custo indisponível (a chamada foi recusada antes de enviar)'
+        : `input ${u.input_tokens} · cache_read ${u.cache_read_input_tokens} · cache_creation ${u.cache_creation_input_tokens} · output ${u.output_tokens}`
+    custo = `Custo do juiz às ${hora(j.t)}: ${numeros} · fora do /usage · não vê CLAUDE.md nem skills · não determinístico`
+  }
+  const contexto = r.contexto.ok
+    ? `Contexto da sessão: ${r.contexto.valor.tokens ?? 'sem medida'} de ${r.contexto.valor.window} tokens${r.contexto.valor.percent === null ? '' : ` (${r.contexto.valor.percent}%)`}`
+    : `Contexto da sessão: indisponível (${r.contexto.motivo})`
+  return [
+    { texto: custo, fraco: true },
+    { texto: contexto, fraco: true },
+  ]
 }
 
 // O resultado do juiz só vale para a entrada atual (mesmo hash) ou quando foi mantido sem turno novo (D-A5);
@@ -160,35 +269,10 @@ function juizVisivel(r: ResultadoC, entrada: EntradaC | null): Juiz | null {
     : null
 }
 
-// Os achados com botões na tela: os descartados (citação não encontrada) ficam só como linha de texto.
+// Os achados não descartados do juiz visível: base de `ruim`/`sugestoes` (D-F5/D-F6).
 export function achadosDaTela(r: ResultadoC | null, entrada: EntradaC | null): Achado[] {
   const j = r === null ? null : juizVisivel(r, entrada)
   return j === null ? [] : j.achados.filter(a => a.estado !== 'descartado')
-}
-
-function linhasJuiz(j: Juiz, semTurnoNovo: boolean, l: (texto: string, fraco?: boolean) => number): void {
-  if (j.reutilizado === true) l('Resultado guardado, sem custo: a entrada não mudou desde a última avaliação.')
-  if (semTurnoNovo) l(`Sem turnos novos desde a avaliação das ${hora(j.t)}: resultado do juiz mantido, sem nova chamada.`)
-  if (j.resultado !== 'ok') l(`Juiz: ${j.resultado}${j.motivo === undefined ? '' : ` · ${j.motivo}`}`)
-  else {
-    for (const dim of DIMENSOES) {
-      const a = j.achados.find(x => x.dim === dim)
-      if (a === undefined) l(`${dim}: nada a apontar`)
-      else if (a.estado === 'descartado') l(`${dim}: descartado: citação não encontrada`)
-      else {
-        l(`${dim}: nível ${a.nivel}${a.estado === 'ja-apontado' ? ' · já apontado' : ''} · "${a.citacao}"`)
-        if (a.voto !== undefined) l(`  voto: ${a.voto}`, true)
-      }
-    }
-  }
-  const u = j.usage
-  l(
-    u === null
-      ? 'Custo da última avaliação: indisponível (a chamada foi recusada antes de enviar)'
-      : `Custo da última avaliação: input ${u.input_tokens} · cache_read ${u.cache_read_input_tokens} · cache_creation ${u.cache_creation_input_tokens} · output ${u.output_tokens}`,
-    true,
-  )
-  if (j.gravacao !== undefined) l(`Não gravado em avaliacoes: ${j.gravacao}`)
 }
 
 // D-J11: o estado da entrada do juiz; `hash` completo quando montada.
@@ -204,26 +288,21 @@ export function textoEntrada(e: EntradaC | null): string {
   return [`hash ${e.hash}`, ...partes].join('\n')
 }
 
-function camada1(f: Fatos, l: (texto: string, fraco?: boolean) => number): void {
-  const dado = <V,>(rotulo: string, d: Dado<V>, mostrar: (v: V) => string) =>
-    l(`${rotulo}: ${d.ok ? mostrar(d.valor) : `indisponível (${d.motivo})`}`)
-
-  l(linhaEscopo(f))
-  dado('Tempo ativo', f.tempoAtivoSeg, v => `pelo menos ${formatarRelogio(v)}`)
-  dado('Commits', f.commits, v => String(v.length))
-  if (f.commits.ok) for (const commit of f.commits.valor) l(`  ${commit.assunto}`, true)
-  dado('Tempo desde o último avanço', f.desdeAvancoSeg, v => formatarRelogio(v))
-  if (f.timebox !== null) dado('Timebox', f.timebox, v => `${v.min} min · ${v.atingido ? 'atingido' : 'não atingido'}`)
-  l(`Turnos do dev: ${f.turnos}`)
-  dado('Edições', f.edicoes, v => `pelo menos ${v}`)
-  dado('Ciclos de refinamento', f.ciclos, v => `pelo menos ${v}`)
-  if (f.semMensagem.ok && f.semMensagem.valor > 0) l(`${f.semMensagem.valor} prompts sem mensagem correspondente`, true)
-  if (f.mensagensSemRegistro.ok && f.mensagensSemRegistro.valor > 0) {
-    l(`${f.mensagensSemRegistro.valor} mensagens do dev sem registro (omitidas)`, true)
+// D-B2(2): a camada 1 numa linha; fato indisponível = "<nome> indisponível (motivo)" na mesma posição.
+function linhaCamada1(f: Fatos): string {
+  const dado = <V,>(nome: string, d: Dado<V>, mostrar: (v: V) => string) =>
+    d.ok ? mostrar(d.valor) : `${nome} indisponível (${d.motivo})`
+  const partes = [
+    linhaEscopo(f),
+    dado('tempo ativo', f.tempoAtivoSeg, v => `tempo ativo ≥ ${formatarRelogio(v)}`),
+    dado('commits', f.commits, v => `${v.length} commits`),
+    dado('último avanço', f.desdeAvancoSeg, v => `último avanço há ${formatarRelogio(v)}`),
+    dado('ciclos', f.ciclos, v => `ciclos ≥ ${v}`),
+  ]
+  if (f.timebox !== null) {
+    partes.push(dado('timebox', f.timebox, v => `timebox ${v.min} min (${v.atingido ? 'atingido' : 'não atingido'})`))
   }
-  l(`Compactações: ${f.compactacoes.length}`)
-  if (f.compactacoes.length > 0) l(`Histórico anterior a ${hora(Math.max(...f.compactacoes))} compactado`, true)
-  if (f.objetivo === null || !f.objetivo.temDod) l('Tangente e DoD: indisponível: defina objetivo e DoD')
+  return partes.join(' · ')
 }
 
 function linhaEscopo(f: Fatos): string {
@@ -297,25 +376,31 @@ const VOTOS: readonly { voto: Voto; rotulo: string }[] = [
   { voto: 'errado', rotulo: 'errado' },
 ]
 
-// D-F4/D-F5/D-F6: a árvore da linha do `/hsg avaliar` no feed: as linhas do modelo, os votos por achado e, quando a
-// avaliação é ruim, os botões de sugestão (o terminal desenha `[ rótulo ]`).
-export function linhaRica(el: El, linhas: readonly Linha[], achados: readonly Achado[], alvo: Alvo | null, acoes: AcoesLinha) {
+// D-F4/D-B1: a árvore da linha do `/hsg avaliar` no feed: topo → um row por eixo (na cor do eixo, com os votos U2 do
+// achado) e a citação embaixo → laudo → sugestões D-F5/D-F6 quando a avaliação é ruim → rodapé.
+export function linhaRica(el: El, m: ModeloAvaliacao, achados: readonly Achado[], alvo: Alvo | null, acoes: AcoesLinha) {
   const { Box, Text, Button } = el
   return (
     <Box flexDirection="column">
-      {linhas.map(x => (
+      {m.topo.map(x => (
         <Text dimColor={x.fraco}>{x.texto}</Text>
       ))}
-      {achados.map(a => (
-        <Box flexDirection="row" gap={1}>
-          <Text>{a.dim}</Text>
-          {VOTOS.map(v => (
-            <Button key={`hsg-u2-${a.dim}-${v.voto}`} onPress={() => acoes.votar(a, v.voto)}>
-              <Text>{v.rotulo}</Text>
-            </Button>
-          ))}
+      {m.eixos.map(e => (
+        <Box flexDirection="column">
+          <Box flexDirection="row" gap={1}>
+            <Text color={e.cor}>{e.texto}</Text>
+            {e.achado !== null &&
+              VOTOS.map(v => (
+                <Button key={`hsg-u2-${e.dim}-${v.voto}`} onPress={() => acoes.votar(e.achado as Achado, v.voto)}>
+                  <Text>{v.rotulo}</Text>
+                </Button>
+              ))}
+          </Box>
+          {e.citacao !== null && <Text color={e.cor}>{e.citacao}</Text>}
         </Box>
       ))}
+      {m.laudo !== null &&
+        (m.laudo.cor === null ? <Text bold>{m.laudo.texto}</Text> : <Text bold color={m.laudo.cor}>{m.laudo.texto}</Text>)}
       {ruim(achados) &&
         (alvo === null ? (
           <Text>Sugestões indisponíveis: avaliação sem objetivo e DoD</Text>
@@ -331,6 +416,9 @@ export function linhaRica(el: El, linhas: readonly Linha[], achados: readonly Ac
             </Box>
           </Box>
         ))}
+      {m.rodape.map(x => (
+        <Text dimColor>{x.texto}</Text>
+      ))}
     </Box>
   )
 }
