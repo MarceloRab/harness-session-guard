@@ -177,8 +177,9 @@ export const register: Register = (on, options) => {
     if (erroFaixa !== null) return faixa($.ui.resolve(e), { tipo: 'erro', erro: erroFaixa }, aviso, pedirT, pedirC)
     // Sem erro e sem configuração só antes de session.start: a faixa passa a vez.
     if (!livro.ok || config === null) return next(e)
-    const medida = medir(await read($, atencao), livro.valor.sessoes, await $.clock.now(), config)
-    return faixa($.ui.resolve(e), { tipo: 'medida', medida }, aviso, pedirT, pedirC)
+    const viva = await read($, atencao)
+    const medida = medir(viva, livro.valor.sessoes, await $.clock.now(), config)
+    return faixa($.ui.resolve(e), { tipo: 'medida', medida, aberta: viva !== null }, aviso, pedirT, pedirC)
   })
 
   // D-F4: a linha do `/hsg avaliar` e do `/hsg entrada` no feed; o id do texto guardado escolhe a árvore. Só lê os atoms.

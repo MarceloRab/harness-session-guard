@@ -2,7 +2,7 @@
 
 Mod do Claude Code que faz duas coisas, sempre sob o seu comando:
 
-- **T** mede o seu tempo de atenção com o agente e o mostra acima do prompt como `● T 2h10 · 6h40` (sessão de atenção · total do dia).
+- **T** mede o seu tempo de atenção com o agente e o mostra acima do prompt como `● T ► 2h10 · Σ 6h40` (`►` sessão de atenção aberta · `Σ` total do dia desde a meia-noite); sem sessão aberta, `■` no lugar de `►` e `0h00`.
 - **C** avalia, quando você pede, se o trabalho do agente está no rumo do objetivo e do DoD que você declarou: primeiro com fatos medidos sem tokens (a camada 1) e depois com um juiz cego (um modelo).
 
 A bolinha **C** (`● C`) fica ao lado da T e nunca muda de cor. Nada é avaliado sozinho.

@@ -23,7 +23,8 @@ export type EntradaDetalhes = {
   agora: number
 }
 
-export type Faixa = { tipo: 'erro'; erro: string } | { tipo: 'medida'; medida: Medida }
+// `aberta`: há sessão de atenção aberta nesta janela (`►`); sem ela, `■`.
+export type Faixa = { tipo: 'erro'; erro: string } | { tipo: 'medida'; medida: Medida; aberta: boolean }
 
 type El = ReturnType<EngineInterface['ui']['resolve']>
 
@@ -347,11 +348,11 @@ export function faixa(
           <Text color="error">T! {f.erro} · /hsg</Text>
         ) : f.medida.cor === 'neutra' ? (
           <Text dimColor>
-            ● T {formatarRelogio(f.medida.sessaoSeg)} · {formatarRelogio(f.medida.diaSeg)}
+            ● T {f.aberta ? '►' : '■'} {formatarRelogio(f.medida.sessaoSeg)} · Σ {formatarRelogio(f.medida.diaSeg)}
           </Text>
         ) : (
           <Text color={COR[f.medida.cor]}>
-            ● T {formatarRelogio(f.medida.sessaoSeg)} · {formatarRelogio(f.medida.diaSeg)}
+            ● T {f.aberta ? '►' : '■'} {formatarRelogio(f.medida.sessaoSeg)} · Σ {formatarRelogio(f.medida.diaSeg)}
           </Text>
         )}
       </Button>
