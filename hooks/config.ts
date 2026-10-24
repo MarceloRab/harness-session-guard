@@ -13,7 +13,8 @@ export type ConfigResolvida = {
   pausaMinSeg: number
 }
 
-export type ResultadoConfig = { ok: true; config: ConfigResolvida } | { ok: false; campo: string }
+export type CampoConfig = 'inicio' | 'fim' | 'dias' | 'intensidade' | 'fimAtencaoMin' | 'pausaMinMin'
+export type ResultadoConfig = { ok: true; config: ConfigResolvida } | { ok: false; campo: CampoConfig }
 
 // Perfis provisórios (D7): limites de "sem pausa" e "longa", em segundos.
 const PERFIS: Record<Intensidade, { semPausaSeg: number; longaSeg: number }> = {

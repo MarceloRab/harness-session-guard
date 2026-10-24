@@ -2,8 +2,9 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Sessao } from '../types'
-import { aplicarAA, aplicarID, expirou } from './atencao'
+import { aplicarAA, aplicarID, expirou, paraRegistro } from './atencao'
 import { resolverConfig, versaoAtende, type ConfigResolvida } from './config'
+import { gravacaoVencida, gravarRegistro, iniciarLivro, registrarErro } from './livro'
 
 const VERSAO_MINIMA = [2, 1, 310] as const
 const ORIGENS_CHANGE = ['history', 'undo', 'engine']
@@ -22,11 +23,14 @@ export const register: Register = (on, options) => {
   const resultado = resolverConfig(options)
 
   on('session.start', async ($, e, next) => {
+    await iniciarLivro($)
     const { base } = await $.session.version()
     config = null
     if (!versaoAtende(base, VERSAO_MINIMA)) {
+      await registrarErro($, 'versao', await $.clock.now())
       erro = `versao: requer Claude Code ${VERSAO_MINIMA.join('.')} ou superior (atual: ${base ?? 'desconhecida'})`
     } else if (!resultado.ok) {
+      await registrarErro($, `config:${resultado.campo}`, await $.clock.now())
       erro = `configuração inválida: ${resultado.campo}`
     } else {
       erro = null
@@ -50,8 +54,10 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // D16: prompt.submit, turn.complete principal e session.end gravam a sessão viva.
   on('prompt.submit', async ($, e, next) => {
-    if (ORIGENS_SUBMIT.includes(e.origin.kind)) await registrarID($)
+    if (ORIGENS_SUBMIT.includes(e.origin.kind)) await registrarID($, true)
+    else await gravarAtual($)
     return next(e)
   })
 
@@ -62,16 +68,32 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) await registrarAA($)
+    if (e.agentId === undefined) {
+      await registrarAA($)
+      await gravarAtual($)
+    }
+    return next(e)
+  })
+
+  on('session.end', async ($, e, next) => {
+    await gravarAtual($)
     return next(e)
   })
 }
 
-export async function registrarID($: EngineInterface): Promise<void> {
+// D16: grava a sessão viva se `gravar` ou se passaram 60 s desde a última gravação.
+export async function registrarID($: EngineInterface, gravar = false): Promise<void> {
   if (config === null) return
   const t = await $.clock.now()
   const sessionId = await $.session.id()
-  await aplicar($, t, (s, c) => aplicarID(s, t, sessionId, c).atual)
+  const atual = await aplicar($, t, (s, c) => aplicarID(s, t, sessionId, c).atual)
+  if (atual !== null && (gravar || gravacaoVencida(t))) await gravarRegistro($, paraRegistro(atual), t)
+}
+
+async function gravarAtual($: EngineInterface): Promise<void> {
+  if (config === null) return
+  const s = await read($, atencao)
+  if (s !== null) await gravarRegistro($, paraRegistro(s), await $.clock.now())
 }
 
 async function registrarAA($: EngineInterface): Promise<void> {
@@ -95,16 +117,24 @@ async function fecharSeExpirou($: EngineInterface): Promise<void> {
   await aplicar($, t, (s, c) => (s !== null && expirou(s, t, c) ? null : s))
 }
 
-// Ponto único de mudança da sessão viva (a gravação da track 03 entra aqui).
+// Ponto único de mudança da sessão viva; D16: a sessão que fecha (ou é trocada) é gravada aqui.
 async function aplicar(
   $: EngineInterface,
   t: number,
   f: (s: Sessao | null, c: ConfigResolvida) => Sessao | null,
-): Promise<void> {
+): Promise<Sessao | null> {
   const c = config
-  if (c === null) return
-  const atual = await update($, atencao, s => f(s, c))
+  if (c === null) return null
+  // `antes` é escrito dentro do callback do `update`; o `as` impede o TS de estreitá-lo para `null`.
+  let antes = null as Sessao | null
+  const atual = await update($, atencao, s => {
+    antes = s
+    return f(s, c)
+  })
   armarFechamento($, atual, t, c)
+  const fechada = antes
+  if (fechada !== null && (atual === null || atual.id !== fechada.id)) await gravarRegistro($, paraRegistro(fechada), t)
+  return atual
 }
 
 // D4: fecha a sessão em `ultimaID + fimAtencao`; rearmado a cada mudança e em session.start.
